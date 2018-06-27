@@ -8,10 +8,6 @@
  *          Mirsal Ennaime <mirsal dot ennaime at gmail dot com>
  *          Hugo Beauzée-Luyssen <hugo@beauzee.fr>
  *          Shaleen Jain <shaleen@jain.sh>
- *          William Ung <william1.ung@epitech.eu>
- *          Felix Paul Kühne <fkuehne # videolan.org>
- *          Bastien Penavayre <swac31@gmail.com>
- *          Andreas Krug <akrug@arcor.de>
  *
  * This program is free software; you can redistribute it and/or modify it
  * under the terms of the GNU Lesser General Public License as published by
@@ -81,6 +77,7 @@ const char* SATIP_SERVER_DEVICE_TYPE = "urn:ses-com:device:SatIPServer:1";
 struct services_discovery_sys_t
 {
     UpnpInstanceWrapper* p_upnp;
+    std::shared_ptr<SD::MediaServerList> p_server_list;
     vlc_thread_t         thread;
 };
 
@@ -90,8 +87,8 @@ struct access_sys_t
 };
 
 UpnpInstanceWrapper* UpnpInstanceWrapper::s_instance;
+UpnpInstanceWrapper::Listeners UpnpInstanceWrapper::s_listeners;
 vlc_mutex_t UpnpInstanceWrapper::s_lock = VLC_STATIC_MUTEX;
-SD::MediaServerList *UpnpInstanceWrapper::p_server_list = NULL;
 
 /*
  * VLC callback prototypes
@@ -223,7 +220,7 @@ SearchThread( void *p_data )
 
     /* Search for media servers */
     int i_res = UpnpSearchAsync( p_sys->p_upnp->handle(), 5,
-            MEDIA_SERVER_DEVICE_TYPE, p_sys->p_upnp );
+            MEDIA_SERVER_DEVICE_TYPE, MEDIA_SERVER_DEVICE_TYPE );
     if( i_res != UPNP_E_SUCCESS )
     {
         msg_Err( p_sd, "Error sending search request: %s", UpnpGetErrorMessage( i_res ) );
@@ -232,7 +229,7 @@ SearchThread( void *p_data )
 
     /* Search for Sat Ip servers*/
     i_res = UpnpSearchAsync( p_sys->p_upnp->handle(), 5,
-            SATIP_SERVER_DEVICE_TYPE, p_sys->p_upnp );
+            SATIP_SERVER_DEVICE_TYPE, MEDIA_SERVER_DEVICE_TYPE );
     if( i_res != UPNP_E_SUCCESS )
         msg_Err( p_sd, "Error sending search request: %s", UpnpGetErrorMessage( i_res ) );
     return NULL;
@@ -252,12 +249,25 @@ static int Open( vlc_object_t *p_this )
 
     p_sd->description = _("Universal Plug'n'Play");
 
-    p_sys->p_upnp = UpnpInstanceWrapper::get( p_this, p_sd );
+    p_sys->p_upnp = UpnpInstanceWrapper::get( p_this );
     if ( !p_sys->p_upnp )
     {
         free(p_sys);
         return VLC_EGENERIC;
     }
+
+    try
+    {
+        p_sys->p_server_list = std::make_shared<SD::MediaServerList>( p_sd );
+    }
+    catch ( const std::bad_alloc& )
+    {
+        msg_Err( p_sd, "Failed to create a MediaServerList");
+        p_sys->p_upnp->release();
+        free(p_sys);
+        return VLC_EGENERIC;
+    }
+    p_sys->p_upnp->addListener( p_sys->p_server_list );
 
     /* XXX: Contrary to what the libupnp doc states, UpnpSearchAsync is
      * blocking (select() and send() are called). Therefore, Call
@@ -265,7 +275,8 @@ static int Open( vlc_object_t *p_this )
     if ( vlc_clone( &p_sys->thread, SearchThread, p_this,
                     VLC_THREAD_PRIORITY_LOW ) )
     {
-        p_sys->p_upnp->release( true );
+        p_sys->p_upnp->removeListener( p_sys->p_server_list );
+        p_sys->p_upnp->release();
         free(p_sys);
         return VLC_EGENERIC;
     }
@@ -282,7 +293,8 @@ static void Close( vlc_object_t *p_this )
     services_discovery_sys_t *p_sys = p_sd->p_sys;
 
     vlc_join( p_sys->thread, NULL );
-    p_sys->p_upnp->release( true );
+    p_sys->p_upnp->removeListener( p_sys->p_server_list );
+    p_sys->p_upnp->release();
     free( p_sys );
 }
 
@@ -675,8 +687,11 @@ void MediaServerList::removeServer( const std::string& udn )
 /*
  * Handles servers listing UPnP events
  */
-int MediaServerList::Callback( Upnp_EventType event_type, UpnpEventPtr p_event )
+int MediaServerList::onEvent( Upnp_EventType event_type, UpnpEventPtr p_event, void* p_user_data )
 {
+    if (p_user_data != MEDIA_SERVER_DEVICE_TYPE)
+        return 0;
+
     switch( event_type )
     {
     case UPNP_DISCOVERY_ADVERTISEMENT_ALIVE:
@@ -689,23 +704,14 @@ int MediaServerList::Callback( Upnp_EventType event_type, UpnpEventPtr p_event )
         int i_res;
         i_res = UpnpDownloadXmlDoc( UpnpDiscovery_get_Location_cstr( p_discovery ), &p_description_doc );
 
-        MediaServerList *self = UpnpInstanceWrapper::lockMediaServerList();
-        if ( !self )
-        {
-            UpnpInstanceWrapper::unlockMediaServerList();
-            return UPNP_E_CANCELED;
-        }
-
         if ( i_res != UPNP_E_SUCCESS )
         {
-            msg_Warn( self->m_sd, "Could not download device description! "
+            msg_Warn( m_sd, "Could not download device description! "
                             "Fetching data from %s failed: %s",
                             UpnpDiscovery_get_Location_cstr( p_discovery ), UpnpGetErrorMessage( i_res ) );
-            UpnpInstanceWrapper::unlockMediaServerList();
             return i_res;
         }
-        self->parseNewServer( p_description_doc, UpnpDiscovery_get_Location_cstr( p_discovery ) );
-        UpnpInstanceWrapper::unlockMediaServerList();
+        parseNewServer( p_description_doc, UpnpDiscovery_get_Location_cstr( p_discovery ) );
         ixmlDocument_free( p_description_doc );
     }
     break;
@@ -713,29 +719,19 @@ int MediaServerList::Callback( Upnp_EventType event_type, UpnpEventPtr p_event )
     case UPNP_DISCOVERY_ADVERTISEMENT_BYEBYE:
     {
         const UpnpDiscovery* p_discovery = ( const UpnpDiscovery* )p_event;
-
-        MediaServerList *self = UpnpInstanceWrapper::lockMediaServerList();
-        if ( self )
-            self->removeServer( UpnpDiscovery_get_DeviceID_cstr( p_discovery ) );
-        UpnpInstanceWrapper::unlockMediaServerList();
+        removeServer( UpnpDiscovery_get_DeviceID_cstr( p_discovery ) );
     }
     break;
 
     case UPNP_EVENT_SUBSCRIBE_COMPLETE:
     {
-        MediaServerList *self = UpnpInstanceWrapper::lockMediaServerList();
-        if ( self )
-            msg_Warn( self->m_sd, "subscription complete" );
-        UpnpInstanceWrapper::unlockMediaServerList();
+        msg_Warn( m_sd, "subscription complete" );
     }
         break;
 
     case UPNP_DISCOVERY_SEARCH_TIMEOUT:
     {
-        MediaServerList *self = UpnpInstanceWrapper::lockMediaServerList();
-        if ( self )
-            msg_Warn( self->m_sd, "search timeout" );
-        UpnpInstanceWrapper::unlockMediaServerList();
+        msg_Warn( m_sd, "search timeout" );
     }
         break;
 
@@ -747,10 +743,7 @@ int MediaServerList::Callback( Upnp_EventType event_type, UpnpEventPtr p_event )
 
     default:
     {
-        MediaServerList *self = UpnpInstanceWrapper::lockMediaServerList();
-        if ( self )
-            msg_Err( self->m_sd, "Unhandled event, please report ( type=%d )", event_type );
-        UpnpInstanceWrapper::unlockMediaServerList();
+        msg_Err( m_sd, "Unhandled event, please report ( type=%d )", event_type );
     }
         break;
     }
@@ -1296,7 +1289,7 @@ static int Open( vlc_object_t *p_this )
         return VLC_ENOMEM;
 
     p_access->p_sys = p_sys;
-    p_sys->p_upnp = UpnpInstanceWrapper::get( p_this, NULL );
+    p_sys->p_upnp = UpnpInstanceWrapper::get( p_this );
     if ( !p_sys->p_upnp )
     {
         delete p_sys;
@@ -1314,7 +1307,7 @@ static void Close( vlc_object_t* p_this )
     stream_t* p_access = (stream_t*)p_this;
     access_sys_t *sys = (access_sys_t *)p_access->p_sys;
 
-    sys->p_upnp->release( false );
+    sys->p_upnp->release();
     delete sys;
 }
 
@@ -1738,26 +1731,14 @@ static char *getIpv4ForMulticast()
 
 #endif /* _WIN32 */
 
-UpnpInstanceWrapper *UpnpInstanceWrapper::get(vlc_object_t *p_obj, services_discovery_t *p_sd)
+UpnpInstanceWrapper *UpnpInstanceWrapper::get(vlc_object_t *p_obj)
 {
-    SD::MediaServerList *p_server_list = NULL;
-    if (p_sd)
-    {
-        p_server_list = new(std::nothrow) SD::MediaServerList( p_sd );
-        if ( unlikely( p_server_list == NULL ) )
-        {
-            msg_Err( p_sd, "Failed to create a MediaServerList");
-            return NULL;
-        }
-    }
-
     vlc_mutex_locker lock( &s_lock );
     if ( s_instance == NULL )
     {
         UpnpInstanceWrapper* instance = new(std::nothrow) UpnpInstanceWrapper;
         if ( unlikely( !instance ) )
         {
-            delete p_server_list;
             return NULL;
         }
 
@@ -1780,7 +1761,6 @@ UpnpInstanceWrapper *UpnpInstanceWrapper::get(vlc_object_t *p_obj, services_disc
         {
             msg_Err( p_obj, "Initialization failed: %s", UpnpGetErrorMessage( i_res ) );
             delete instance;
-            delete p_server_list;
             return NULL;
         }
 
@@ -1792,7 +1772,6 @@ UpnpInstanceWrapper *UpnpInstanceWrapper::get(vlc_object_t *p_obj, services_disc
         {
             msg_Err( p_obj, "Client registration failed: %s", UpnpGetErrorMessage( i_res ) );
             delete instance;
-            delete p_server_list;
             return NULL;
         }
 
@@ -1804,30 +1783,18 @@ UpnpInstanceWrapper *UpnpInstanceWrapper::get(vlc_object_t *p_obj, services_disc
             msg_Err( p_obj, "Failed to set maximum content length: %s",
                     UpnpGetErrorMessage( i_res ));
             delete instance;
-            delete p_server_list;
             return NULL;
         }
         s_instance = instance;
     }
     s_instance->m_refcount++;
-    // This assumes a single UPNP SD instance
-    if (p_server_list != NULL)
-    {
-        assert(!UpnpInstanceWrapper::p_server_list);
-        UpnpInstanceWrapper::p_server_list = p_server_list;
-    }
     return s_instance;
 }
 
-void UpnpInstanceWrapper::release(bool isSd)
+void UpnpInstanceWrapper::release()
 {
     UpnpInstanceWrapper *p_delete = NULL;
     vlc_mutex_locker lock( &s_lock );
-    if ( isSd )
-    {
-        delete UpnpInstanceWrapper::p_server_list;
-        UpnpInstanceWrapper::p_server_list = NULL;
-    }
     if (--s_instance->m_refcount == 0)
     {
         p_delete = s_instance;
@@ -1843,26 +1810,30 @@ UpnpClient_Handle UpnpInstanceWrapper::handle() const
 
 int UpnpInstanceWrapper::Callback(Upnp_EventType event_type, UpnpEventPtr p_event, void *p_user_data)
 {
-    VLC_UNUSED(p_user_data);
-    vlc_mutex_lock( &s_lock );
-    if ( !UpnpInstanceWrapper::p_server_list )
+    for (Listeners::iterator iter = s_listeners.begin(); iter != s_listeners.end(); ++iter)
     {
-        vlc_mutex_unlock( &s_lock );
-        /* no MediaServerList available (anymore), do nothing */
-        return 0;
+        (*iter)->onEvent(event_type, p_event, p_user_data);
     }
-    vlc_mutex_unlock( &s_lock );
-    SD::MediaServerList::Callback( event_type, p_event );
+
     return 0;
 }
 
-SD::MediaServerList *UpnpInstanceWrapper::lockMediaServerList()
+void UpnpInstanceWrapper::addListener(ListenerPtr listener)
 {
-    vlc_mutex_lock( &s_lock ); /* do not allow deleting the p_server_list while using it */
-    return UpnpInstanceWrapper::p_server_list;
+    vlc_mutex_lock( &s_lock );
+    if ( std::find( s_listeners.begin(), s_listeners.end(), listener) != s_listeners.end() )
+        return;
+    s_listeners.push_back( std::move(listener) );
+    vlc_mutex_unlock( &s_lock );
 }
 
-void UpnpInstanceWrapper::unlockMediaServerList()
+void UpnpInstanceWrapper::removeListener(ListenerPtr listener)
 {
+    vlc_mutex_lock( &s_lock );
+    Listeners::iterator iter = std::find( s_listeners.begin(), s_listeners.end(), listener );
+    if ( iter == s_listeners.end() )
+        return;
+
+    s_listeners.erase( iter );
     vlc_mutex_unlock( &s_lock );
 }
