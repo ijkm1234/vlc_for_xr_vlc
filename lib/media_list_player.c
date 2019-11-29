@@ -33,6 +33,7 @@
 #include <vlc/libvlc_media_list.h>
 #include <vlc/libvlc_media_player.h>
 #include <vlc/libvlc_media_list_player.h>
+#include <vlc/libvlc_picture.h>
 #include <vlc/libvlc_events.h>
 #include <assert.h>
 

@@ -467,7 +467,7 @@ int input_vaControl( input_thread_t *p_input, int i_query, va_list args )
             *pi_attachment = priv->i_attachment;
             *ppp_attachment = vlc_alloc( priv->i_attachment, sizeof(input_attachment_t*));
             for( int i = 0; i < priv->i_attachment; i++ )
-                (*ppp_attachment)[i] = vlc_input_attachment_Duplicate( priv->attachment[i] );
+                (*ppp_attachment)[i] = vlc_input_attachment_Hold( priv->attachment[i] );
 
             vlc_mutex_unlock( &priv->p_item->lock );
             return VLC_SUCCESS;
@@ -483,7 +483,7 @@ int input_vaControl( input_thread_t *p_input, int i_query, va_list args )
             {
                 if( !strcmp( priv->attachment[i]->psz_name, psz_name ) )
                 {
-                    *pp_attachment = vlc_input_attachment_Duplicate(priv->attachment[i] );
+                    *pp_attachment = vlc_input_attachment_Hold(priv->attachment[i] );
                     vlc_mutex_unlock( &priv->p_item->lock );
                     return VLC_SUCCESS;
                 }

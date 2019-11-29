@@ -240,6 +240,7 @@ libvlccore_la_SOURCES = \
 	input/info.h \
 	input/meta.c \
 	input/clock.h \
+	input/attachment.c \
 	input/decoder.h \
 	input/demux.h \
 	input/es_out.h \

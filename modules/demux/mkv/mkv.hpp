@@ -133,36 +133,6 @@ Type * FindNextChild(const EbmlMaster & Master, const Type & PastElt)
 
 using namespace LIBMATROSKA_NAMESPACE;
 
-class attachment_c
-{
-public:
-    attachment_c( const std::string& _psz_file_name, const std::string& _psz_mime_type, int _i_size )
-        :i_size(_i_size)
-        ,psz_file_name( _psz_file_name)
-        ,psz_mime_type( _psz_mime_type)
-    {
-        p_data = NULL;
-    }
-    ~attachment_c() { free( p_data ); }
-
-    /* Allocs the data space. Returns true if allocation went ok */
-    bool init()
-    {
-        p_data = malloc( i_size );
-        return (p_data != NULL);
-    }
-
-    const char* fileName() const { return psz_file_name.c_str(); }
-    const char* mimeType() const { return psz_mime_type.c_str(); }
-    int         size() const    { return i_size; }
-
-    void          *p_data;
-private:
-    int            i_size;
-    std::string    psz_file_name;
-    std::string    psz_mime_type;
-};
-
 class matroska_segment_c;
 struct matroska_stream_c
 {

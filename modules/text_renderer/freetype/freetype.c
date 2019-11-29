@@ -333,7 +333,7 @@ static int LoadFontsFromAttachments( filter_t *p_filter )
     if( !p_sys->pp_font_attachments )
     {
         for( int i = 0; i < i_attachments_cnt; ++i )
-            vlc_input_attachment_Delete( pp_attachments[ i ] );
+            vlc_input_attachment_Release( pp_attachments[ i ] );
         free( pp_attachments );
         return VLC_ENOMEM;
     }
@@ -399,7 +399,7 @@ static int LoadFontsFromAttachments( filter_t *p_filter )
         }
         else
         {
-            vlc_input_attachment_Delete( p_attach );
+            vlc_input_attachment_Release( p_attach );
         }
     }
 
@@ -436,7 +436,7 @@ error:
         free( psz_lc );
 
     for( int i = k + 1; i < i_attachments_cnt; ++i )
-        vlc_input_attachment_Delete( pp_attachments[ i ] );
+        vlc_input_attachment_Release( pp_attachments[ i ] );
 
     free( pp_attachments );
     return VLC_ENOMEM;
@@ -1536,7 +1536,7 @@ static void Destroy( vlc_object_t *p_this )
     if( p_sys->pp_font_attachments )
     {
         for( int k = 0; k < p_sys->i_font_attachments; k++ )
-            vlc_input_attachment_Delete( p_sys->pp_font_attachments[k] );
+            vlc_input_attachment_Release( p_sys->pp_font_attachments[k] );
 
         free( p_sys->pp_font_attachments );
     }
