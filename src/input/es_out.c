@@ -323,7 +323,7 @@ es_out_t *input_EsOutNew( input_thread_t *p_input, int i_rate )
     TAB_INIT( p_sys->i_es, p_sys->es );
 
     /* */
-    EsOutPropsInit( &p_sys->video, true, p_input, ES_OUT_ES_POLICY_SIMULTANEOUS,
+    EsOutPropsInit( &p_sys->video, true, p_input, ES_OUT_ES_POLICY_EXCLUSIVE,
                     NULL, NULL, NULL, NULL );
     EsOutPropsInit( &p_sys->audio, true, p_input, ES_OUT_ES_POLICY_EXCLUSIVE,
                     "audio-track-id", "audio-track", "audio-language", "audio" );
