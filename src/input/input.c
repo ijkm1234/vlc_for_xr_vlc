@@ -365,7 +365,7 @@ static input_thread_t *Create( vlc_object_t *p_parent, input_item_t *p_item,
             p_item->i_preparse_depth = -1;
     }
     else
-        p_input->obj.flags |= OBJECT_FLAGS_QUIET | OBJECT_FLAGS_NOINTERACT;
+        p_input->obj.flags |= OBJECT_FLAGS_NOINTERACT;
 
     /* Make sure the interaction option is honored */
     if( !var_InheritBool( p_input, "interact" ) )
