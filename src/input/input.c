@@ -970,7 +970,6 @@ static void StartTitle( input_thread_t * p_input )
         msg_Warn( p_input, "invalid stop-time ignored" );
         priv->i_stop = 0;
     }
-    priv->b_fast_seek = var_GetBool( p_input, "input-fast-seek" );
 }
 
 static int SlaveCompare(const void *a, const void *b)
@@ -2027,7 +2026,7 @@ static bool Control( input_thread_t *p_input,
             /* Reset the decoders states and clock sync (before calling the demuxer */
             es_out_SetTime( input_priv(p_input)->p_es_out, -1 );
             if( demux_Control( input_priv(p_input)->master->p_demux, DEMUX_SET_POSITION,
-                               (double) f_pos, !input_priv(p_input)->b_fast_seek ) )
+                               (double) f_pos, !var_GetBool( p_input, "input-fast-seek" ) ) )
             {
                 msg_Err( p_input, "INPUT_CONTROL_SET_POSITION "
                          "%2.1f%% failed", (double)(f_pos * 100.f) );
@@ -2063,7 +2062,7 @@ static bool Control( input_thread_t *p_input,
 
             i_ret = demux_Control( input_priv(p_input)->master->p_demux,
                                    DEMUX_SET_TIME, i_time,
-                                   !input_priv(p_input)->b_fast_seek );
+                                   !var_GetBool( p_input, "input-fast-seek" ) );
             if( i_ret )
             {
                 int64_t i_length;
@@ -2076,7 +2075,7 @@ static bool Control( input_thread_t *p_input,
                     f_pos = VLC_CLIP(f_pos, 0.0, 1.0);
                     i_ret = demux_Control( input_priv(p_input)->master->p_demux,
                                             DEMUX_SET_POSITION, f_pos,
-                                            !input_priv(p_input)->b_fast_seek );
+                                            !var_GetBool( p_input, "input-fast-seek" ) );
                 }
             }
             if( i_ret )
