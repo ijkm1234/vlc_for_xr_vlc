@@ -453,6 +453,8 @@ static int login( stream_t *p_access )
 
     vlc_credential_get( &credential, p_access, "smb-user", "smb-pwd",
                         NULL, NULL );
+    if (vlc_killed())
+        goto error;
 
     if( !credential.psz_username )
     {
