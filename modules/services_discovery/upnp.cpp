@@ -1402,7 +1402,7 @@ static IP_ADAPTER_ADDRESSES* ListAdapters()
     return addresses;
 }
 
-static char* getPreferedAdapter()
+static char* getPreferedAdapter(vlc_object_t *)
 {
     IP_ADAPTER_ADDRESSES *p_adapter, *addresses;
 
@@ -1527,7 +1527,7 @@ done:
 #include <SystemConfiguration/SystemConfiguration.h>
 #include "vlc_charset.h"
 
-inline char *getPreferedAdapter()
+inline char *getPreferedAdapter(vlc_object_t *)
 {
     SCDynamicStoreRef session = SCDynamicStoreCreate(NULL, CFSTR("session"), NULL, NULL);
     if (session == NULL)
@@ -1559,7 +1559,7 @@ inline bool necessaryFlagsSetOnInterface(struct ifaddrs *anInterface)
     return false;
 }
 
-inline char *getPreferedAdapter()
+inline char *getPreferedAdapter(vlc_object_t *)
 {
     struct ifaddrs *listOfInterfaces;
     struct ifaddrs *anInterface;
@@ -1587,9 +1587,144 @@ inline char *getPreferedAdapter()
 
 #endif
 
-#else /* *nix and Android */
+#elif defined(__ANDROID__)  /* Android */
 
-inline char *getPreferedAdapter()
+#include <array>
+#include <sys/ioctl.h>
+
+static char *getPreferedAdapterAndroid(int ioctl_sock, vlc_object_t *obj)
+{
+    static constexpr auto MAX_INTERFACES = 0x100u;
+    struct ifreq intf_array[MAX_INTERFACES];
+
+    struct ifconf intf_requests;
+    intf_requests.ifc_len = sizeof(intf_array),
+    intf_requests.ifc_ifcu.ifcu_buf = reinterpret_cast<caddr_t>(intf_array);
+
+    /* Interface list request. */
+    if (ioctl(ioctl_sock, SIOCGIFCONF, &intf_requests) < 0)
+    {
+        msg_Err(obj, "Couldn't fetch interface list");
+        return NULL;
+    }
+
+    static constexpr auto PREFIX_MAX_SIZE = 0x10u;
+    /* All interfaces will be matched to theses prefixs and stored to the
+     * priority array below. */
+    struct intf_prefix
+    {
+        /* The lower the numeric value of the enum is, the most priority the
+         * interface will have (So here, we prioritize VPN then ethernet and
+         * then wifi). */
+        enum
+        {
+            INTF_PRIO_VPN = 0,
+            INTF_PRIO_ETHERNET,
+            INTF_PRIO_WIFI,
+
+            INTF_PRIO_COUNT,
+        } priority;
+        char prefix[PREFIX_MAX_SIZE];
+    };
+
+    /* Priority/Prefix interface match array. */
+    static constexpr std::array<intf_prefix, 6> INTF_PREFIXS{{
+        {intf_prefix::INTF_PRIO_VPN, "ppp"},
+        {intf_prefix::INTF_PRIO_VPN, "tun"},
+        {intf_prefix::INTF_PRIO_VPN, "tap"},
+        {intf_prefix::INTF_PRIO_ETHERNET, "eth"},
+        {intf_prefix::INTF_PRIO_ETHERNET, "enp"},
+        {intf_prefix::INTF_PRIO_WIFI, "wlan"},
+    }};
+
+    std::array<const struct ifreq *, intf_prefix::INTF_PRIO_COUNT>
+        valid_interfaces{};
+
+    /* Loop through all the interfaces. */
+    for (int i = 0; i < intf_requests.ifc_len; i += sizeof(intf_array[0]))
+    {
+        struct ifreq *intf_req = (struct ifreq *)(intf_requests.ifc_buf + i);
+        const char *name = intf_req->ifr_ifrn.ifrn_name;
+
+        /* Fetch interface flags. */
+        if (ioctl(ioctl_sock, SIOCGIFFLAGS, intf_req) < 0)
+        {
+            msg_Warn(obj, "Couldn't fetch interface flags for '%s'", name);
+            continue;
+        }
+
+        const bool is_loopback = intf_req->ifr_flags & IFF_LOOPBACK;
+        const bool is_up = intf_req->ifr_flags & IFF_UP;
+        const bool supports_multicast = intf_req->ifr_flags & IFF_MULTICAST;
+        if (is_loopback || !is_up || !supports_multicast)
+        {
+            const auto yes_no = [](bool b) -> const char *
+            { return b ? "yes" : "no"; };
+            msg_Dbg(obj,
+                    "Skipping interface '%s' (lo=%s, up=%s, mutlicast=%s)",
+                    name,
+                    yes_no(is_loopback),
+                    yes_no(is_up),
+                    yes_no(supports_multicast));
+            continue;
+        }
+
+        bool is_valid = false;
+        for (const auto &prefix : INTF_PREFIXS)
+        {
+            if (!strncmp(name, prefix.prefix, strlen(prefix.prefix)))
+            {
+                msg_Dbg(obj, "Interface '%s' is valid", name);
+
+                is_valid = true;
+
+                /* Always prioritize the first interface found if there is two
+                 * or more same kind. */
+                if (valid_interfaces[prefix.priority] == nullptr)
+                    valid_interfaces[prefix.priority] = intf_req;
+
+                break;
+            }
+        }
+
+        if (!is_valid)
+            msg_Dbg(obj, "Interface '%s' is invalid", name);
+    }
+
+    /* Valid interfaces are already stored in priority order, just return the
+     * first valid one. */
+    for (const auto *valid_intf : valid_interfaces)
+    {
+        if (valid_intf != nullptr)
+            return strdup(valid_intf->ifr_ifrn.ifrn_name);
+    }
+    return NULL;
+}
+
+static char *getPreferedAdapter(vlc_object_t *obj)
+{
+    /*
+     * XXX: Android doesn't implement getifaddrs() until API 24. VLC is
+     * currently stuck at API 21. For clarity we then use an ioctl socket to
+     * retrieve IPv4 *only* compliant interfaces. Proper IPv6 support will be
+     * there for 4.0...
+     */
+    const int ioctl_sock = socket(AF_INET, SOCK_DGRAM, IPPROTO_UDP);
+    if (ioctl_sock == -1)
+    {
+        msg_Err(obj, "Failed to open the ioctl to fetch net intf infos");
+        return NULL;
+    }
+
+    char *ret = getPreferedAdapterAndroid(ioctl_sock, obj);
+
+    close(ioctl_sock);
+    return ret;
+}
+
+#else /* *nix */
+
+inline char *getPreferedAdapter(vlc_object_t *)
 {
     return NULL;
 }
@@ -1631,8 +1766,8 @@ UpnpInstanceWrapper *UpnpInstanceWrapper::get(vlc_object_t *p_obj, services_disc
     #if UPNP_VERSION >= 10803 || defined( UPNP_ENABLE_IPV6 )
         char* psz_miface = var_InheritString( p_obj, "miface" );
         if (psz_miface == NULL)
-            psz_miface = getPreferedAdapter();
-        msg_Info( p_obj, "Initializing libupnp on '%s' interface", psz_miface ? psz_miface : "default" );
+            psz_miface = getPreferedAdapter(p_obj);
+        msg_Info( p_obj, "Initializating libupnp on '%s' interface", psz_miface ? psz_miface : "default" );
         int i_res = UpnpInit2( psz_miface, 0 );
         free( psz_miface );
     #else
