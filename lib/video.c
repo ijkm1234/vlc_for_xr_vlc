@@ -454,6 +454,44 @@ int libvlc_video_set_spu_delay( libvlc_media_player_t *p_mi,
     return ret;
 }
 
+void libvlc_video_set_xr_subtitle_stack_outside( libvlc_media_player_t *p_mi,
+                                                 bool enabled )
+{
+    const char *psz_var = "xr-subtitle-stack-outside";
+
+    var_Create( p_mi, psz_var, VLC_VAR_BOOL );
+    var_SetBool( p_mi, psz_var, enabled );
+
+    size_t n;
+    vout_thread_t **pp_vouts = GetVouts( p_mi, &n );
+    for( size_t i = 0; i < n; i++ )
+    {
+        var_Create( pp_vouts[i], psz_var, VLC_VAR_BOOL );
+        var_SetBool( pp_vouts[i], psz_var, enabled );
+        vlc_object_release( pp_vouts[i] );
+    }
+    free( pp_vouts );
+}
+
+void libvlc_video_set_xr_subtitle_surface_enabled( libvlc_media_player_t *p_mi,
+                                                   bool enabled )
+{
+    const char *psz_var = "xr-subtitle-surface-enabled";
+
+    var_Create( p_mi, psz_var, VLC_VAR_BOOL );
+    var_SetBool( p_mi, psz_var, enabled );
+
+    size_t n;
+    vout_thread_t **pp_vouts = GetVouts( p_mi, &n );
+    for( size_t i = 0; i < n; i++ )
+    {
+        var_Create( pp_vouts[i], psz_var, VLC_VAR_BOOL );
+        var_SetBool( pp_vouts[i], psz_var, enabled );
+        vlc_object_release( pp_vouts[i] );
+    }
+    free( pp_vouts );
+}
+
 libvlc_track_description_t *
         libvlc_video_get_title_description( libvlc_media_player_t *p_mi )
 {

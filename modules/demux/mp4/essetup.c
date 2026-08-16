@@ -110,6 +110,20 @@ static void SetupESDS( demux_t *p_demux, mp4_track_t *p_track, const MP4_descrip
     }
 }
 
+static uint8_t GetMPEG4AudioChannelConfiguration( const MP4_descriptor_decoder_config_t *p_decconfig )
+{
+    if( !p_decconfig || !p_decconfig->p_decoder_specific_info ||
+        p_decconfig->i_decoder_specific_info_len < 2 )
+        return 0;
+
+    const uint8_t *p_asc = p_decconfig->p_decoder_specific_info;
+    const uint8_t i_sample_rate_index = ((p_asc[0] & 0x07) << 1) | (p_asc[1] >> 7);
+    if( i_sample_rate_index == 0x0f )
+        return 0;
+
+    return (p_asc[1] >> 3) & 0x0f;
+}
+
 static int SetupRTPReceptionHintTrack( demux_t *p_demux, mp4_track_t *p_track, MP4_Box_t *p_sample )
 {
     p_track->fmt.i_original_fourcc = p_sample->i_type;
@@ -1247,10 +1261,12 @@ int SetupAudioES( demux_t *p_demux, mp4_track_t *p_track, MP4_Box_t *p_sample )
         with decoder_specific_info  */
     MP4_Box_t *p_esds = MP4_BoxGet( p_sample, "esds" );
     if ( !p_esds ) p_esds = MP4_BoxGet( p_sample, "wave/esds" );
+    const MP4_descriptor_decoder_config_t *p_decconfig = NULL;
     if ( p_esds && BOXDATA(p_esds) && BOXDATA(p_esds)->es_descriptor.p_decConfigDescr )
     {
         assert(p_sample->i_type == ATOM_mp4a);
-        SetupESDS( p_demux, p_track, BOXDATA(p_esds)->es_descriptor.p_decConfigDescr );
+        p_decconfig = BOXDATA(p_esds)->es_descriptor.p_decConfigDescr;
+        SetupESDS( p_demux, p_track, p_decconfig );
     }
     else switch( p_sample->i_type )
     {
@@ -1317,6 +1333,15 @@ int SetupAudioES( demux_t *p_demux, mp4_track_t *p_track, MP4_Box_t *p_sample )
     const MP4_Box_t *p_SA3D = MP4_BoxGet(p_sample, "SA3D");
     if (p_SA3D && BOXDATA(p_SA3D))
         p_track->fmt.audio.channel_type = AUDIO_CHANNEL_TYPE_AMBISONICS;
+    else if( var_InheritBool( p_demux, "mp4-force-unmarked-aac4-ambisonics" ) &&
+             p_track->fmt.i_codec == VLC_CODEC_MP4A &&
+             p_soun->i_channelcount == 2 &&
+             GetMPEG4AudioChannelConfiguration( p_decconfig ) == 4 )
+    {
+        p_track->fmt.audio.channel_type = AUDIO_CHANNEL_TYPE_AMBISONICS;
+        p_track->fmt.audio.i_channels = 4;
+        msg_Warn( p_demux, "forcing Ambisonics channel type for unmarked 4-channel AAC track" );
+    }
 
     /* Late fixes */
     if ( p_soun->i_qt_version == 0 && p_track->fmt.i_codec == VLC_CODEC_QCELP )
