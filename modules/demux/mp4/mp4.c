@@ -50,6 +50,10 @@ static void Close( vlc_object_t * );
 
 #define MP4_M4A_TEXT     N_("M4A audio only")
 #define MP4_M4A_LONGTEXT N_("Ignore non audio tracks from iTunes audio files")
+#define MP4_FORCE_UNMARKED_AAC4_AMBISONICS_TEXT \
+    N_("Force unmarked 4-channel AAC as Ambisonics")
+#define MP4_FORCE_UNMARKED_AAC4_AMBISONICS_LONGTEXT \
+    N_("Treat MP4/AAC tracks with a 2-channel sample entry and AAC channelConfiguration 4 as Ambisonics. This should only be enabled for known panoramic media.")
 
 vlc_module_begin ()
     set_category( CAT_INPUT )
@@ -61,6 +65,9 @@ vlc_module_begin ()
 
     add_category_hint("Hacks", NULL, true)
     add_bool( CFG_PREFIX"m4a-audioonly", false, MP4_M4A_TEXT, MP4_M4A_LONGTEXT, true )
+    add_bool( CFG_PREFIX"force-unmarked-aac4-ambisonics", false,
+              MP4_FORCE_UNMARKED_AAC4_AMBISONICS_TEXT,
+              MP4_FORCE_UNMARKED_AAC4_AMBISONICS_LONGTEXT, true )
 vlc_module_end ()
 
 /*****************************************************************************
@@ -4531,6 +4538,9 @@ static int DemuxMoof( demux_t *p_demux )
 {
     demux_sys_t *p_sys = p_demux->p_sys;
     int i_status;
+    const uint32_t i_xr_sequence = p_sys->context.p_fragment_atom
+                                 ? FragGetMoofSequenceNumber( p_sys->context.p_fragment_atom )
+                                 : 0;
 
     const unsigned i_max_preload = ( p_sys->b_fastseekable ) ? 0 : ( p_sys->b_seekable ) ? DEMUX_TRACK_MAX_PRELOAD : UINT_MAX;
 
@@ -4538,7 +4548,14 @@ static int DemuxMoof( demux_t *p_demux )
 
     /* !important! Ensure clock is set before sending data */
     if( p_sys->i_pcr == VLC_TICK_INVALID )
-        es_out_SetPCR( p_demux->out, VLC_TICK_0 + i_nztime );
+    {
+        const vlc_tick_t i_new_pcr = VLC_TICK_0 + i_nztime;
+        msg_Warn( p_demux, "XR_MP4_DIAG pcr_source source=frag_initial "
+                  "sequence=%"PRIu32" nztime_ms=%"PRId64" "
+                  "previous_pcr_ms=-1 new_pcr_ms=%"PRId64,
+                  i_xr_sequence, i_nztime / 1000, i_new_pcr / 1000 );
+        es_out_SetPCR( p_demux->out, i_new_pcr );
+    }
 
     /* Set per track read state */
     for( unsigned i = 0; i < p_sys->i_tracks; i++ )
@@ -4611,27 +4628,65 @@ static int DemuxMoof( demux_t *p_demux )
 
     if( i_status != VLC_DEMUXER_EOS )
     {
+        const vlc_tick_t i_previous_pcr = p_sys->i_pcr;
         p_sys->i_nztime += DEMUX_INCREMENT;
-        p_sys->i_pcr = VLC_TICK_0 + p_sys->i_nztime;
+        const vlc_tick_t i_new_pcr = VLC_TICK_0 + p_sys->i_nztime;
+        if( i_previous_pcr > VLC_TICK_INVALID && i_new_pcr < i_previous_pcr )
+            msg_Warn( p_demux, "XR_MP4_DIAG pcr_source source=frag_advance "
+                      "sequence=%"PRIu32" nztime_ms=%"PRId64" "
+                      "previous_pcr_ms=%"PRId64" new_pcr_ms=%"PRId64" "
+                      "delta_ms=%"PRId64,
+                      i_xr_sequence, p_sys->i_nztime / 1000,
+                      i_previous_pcr / 1000, i_new_pcr / 1000,
+                      (i_new_pcr - i_previous_pcr) / 1000 );
+        p_sys->i_pcr = i_new_pcr;
         es_out_SetPCR( p_demux->out, p_sys->i_pcr );
     }
     else
     {
         vlc_tick_t i_segment_end = INT64_MAX;
+        msg_Warn( p_demux, "XR_MP4_DIAG frag_eos_scan sequence=%"PRIu32" "
+                  "tracks=%u seekable=%d nztime_ms=%"PRId64" current_pcr_ms=%"PRId64,
+                  i_xr_sequence, p_sys->i_tracks, p_sys->b_seekable,
+                  p_sys->i_nztime / 1000,
+                  p_sys->i_pcr > VLC_TICK_INVALID ? p_sys->i_pcr / 1000 : -1 );
         for( unsigned i = 0; i < p_sys->i_tracks; i++ )
         {
             mp4_track_t *tk = &p_sys->track[i];
-            if( tk->b_ok || tk->b_chapters_source ||
-               (!tk->b_selected && !p_sys->b_seekable) )
+            const bool b_considered = tk->b_ok && !tk->b_chapters_source &&
+                                      (tk->b_selected || p_sys->b_seekable);
+            const vlc_tick_t i_track_time = MP4_rescale_mtime( tk->i_time,
+                                                               tk->i_timescale );
+            msg_Warn( p_demux, "XR_MP4_DIAG frag_eos_track sequence=%"PRIu32" "
+                      "slot=%u track_id=%"PRIu32" ok=%d chapters=%d "
+                      "selected=%d considered=%d timescale=%"PRIu32" "
+                      "track_time_raw=%"PRId64" track_time_ms=%"PRId64" "
+                      "runs=%u run_current=%u temp_status=%d",
+                      i_xr_sequence, i, tk->i_track_ID, tk->b_ok,
+                      tk->b_chapters_source, tk->b_selected, b_considered,
+                      tk->i_timescale, tk->i_time, i_track_time / 1000,
+                      tk->context.runs.i_count, tk->context.runs.i_current,
+                      tk->context.i_temp );
+            if( !b_considered )
                 continue;
-            vlc_tick_t i_track_end = MP4_rescale_mtime( tk->i_time, tk->i_timescale );
+            vlc_tick_t i_track_end = i_track_time;
             if( i_track_end < i_segment_end  )
                 i_segment_end = i_track_end;
         }
         if( i_segment_end != INT64_MAX )
         {
+            const vlc_tick_t i_previous_pcr = p_sys->i_pcr;
             p_sys->i_nztime = i_segment_end;
             p_sys->i_pcr = VLC_TICK_0 + p_sys->i_nztime;
+            msg_Warn( p_demux, "XR_MP4_DIAG pcr_source source=frag_eos "
+                      "sequence=%"PRIu32" segment_end_ms=%"PRId64" "
+                      "previous_pcr_ms=%"PRId64" new_pcr_ms=%"PRId64" "
+                      "delta_ms=%"PRId64,
+                      i_xr_sequence, i_segment_end / 1000,
+                      i_previous_pcr > VLC_TICK_INVALID ? i_previous_pcr / 1000 : -1,
+                      p_sys->i_pcr / 1000,
+                      i_previous_pcr > VLC_TICK_INVALID
+                          ? (p_sys->i_pcr - i_previous_pcr) / 1000 : 0 );
             es_out_SetPCR( p_demux->out, p_sys->i_pcr );
         }
     }

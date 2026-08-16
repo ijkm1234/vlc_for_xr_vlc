@@ -72,6 +72,22 @@ struct SurfaceTexture
 
 };
 
+static const char *
+AWindowIdName(enum AWindow_ID id)
+{
+    switch (id)
+    {
+        case AWindow_Video:
+            return "AWindow_Video";
+        case AWindow_Subtitles:
+            return "AWindow_Subtitles";
+        case AWindow_SurfaceTexture:
+            return "AWindow_SurfaceTexture";
+        default:
+            return "AWindow_Unknown";
+    }
+}
+
 static struct
 {
     struct {
@@ -635,9 +651,31 @@ WindowHandler_NewSurfaceEnv(AWindowHandler *p_awh, JNIEnv *p_env,
             break;
     }
     if (!jsurface)
+    {
+        if (id == AWindow_Subtitles &&
+            (p_awh->views[id].p_anw || p_awh->views[id].jsurface))
+            AWindowHandler_releaseANativeWindowEnv(p_awh, p_env, id);
+        if (id == AWindow_Subtitles)
+            msg_Err(p_awh->wnd, "XR_SUB_WINDOW WindowHandler_NewSurfaceEnv id=%s returned null jsurface",
+                    AWindowIdName(id));
         return VLC_EGENERIC;
+    }
+
+    if (p_awh->views[id].jsurface &&
+        (*p_env)->IsSameObject(p_env, jsurface, p_awh->views[id].jsurface))
+    {
+        (*p_env)->DeleteLocalRef(p_env, jsurface);
+        return VLC_SUCCESS;
+    }
+
+    if (p_awh->views[id].p_anw || p_awh->views[id].jsurface)
+        AWindowHandler_releaseANativeWindowEnv(p_awh, p_env, id);
 
     p_awh->views[id].jsurface = (*p_env)->NewGlobalRef(p_env, jsurface);
+    if (id == AWindow_Subtitles)
+        msg_Err(p_awh->wnd, "XR_SUB_WINDOW WindowHandler_NewSurfaceEnv id=%s jsurface=%p global=%p",
+                AWindowIdName(id), (void *) jsurface,
+                (void *) p_awh->views[id].jsurface);
     (*p_env)->DeleteLocalRef(p_env, jsurface);
     return VLC_SUCCESS;
 }
@@ -649,19 +687,45 @@ AWindowHandler_getANativeWindow(AWindowHandler *p_awh, enum AWindow_ID id)
 
     JNIEnv *p_env;
 
-    if (p_awh->views[id].p_anw)
+    if (id != AWindow_Subtitles && p_awh->views[id].p_anw)
+    {
         return p_awh->views[id].p_anw;
+    }
 
     p_env = AWindowHandler_getEnv(p_awh);
     if (!p_env)
+    {
+        if (id == AWindow_Subtitles)
+            msg_Err(p_awh->wnd, "XR_SUB_WINDOW AWindowHandler_getANativeWindow id=%s failed: env=null",
+                    AWindowIdName(id));
         return NULL;
+    }
 
-    if (WindowHandler_NewSurfaceEnv(p_awh, p_env, id) != VLC_SUCCESS)
+    if ((id == AWindow_Subtitles || !p_awh->views[id].p_anw) &&
+        WindowHandler_NewSurfaceEnv(p_awh, p_env, id) != VLC_SUCCESS)
+    {
+        if (id == AWindow_Subtitles)
+            msg_Err(p_awh->wnd, "XR_SUB_WINDOW AWindowHandler_getANativeWindow id=%s failed: no Java surface",
+                    AWindowIdName(id));
         return NULL;
+    }
     assert(p_awh->views[id].jsurface != NULL);
+
+    if (p_awh->views[id].p_anw)
+    {
+        if (id == AWindow_Subtitles)
+            msg_Err(p_awh->wnd, "XR_SUB_WINDOW AWindowHandler_getANativeWindow id=%s cached jsurface=%p anw=%p",
+                    AWindowIdName(id), (void *) p_awh->views[id].jsurface,
+                    (void *) p_awh->views[id].p_anw);
+        return p_awh->views[id].p_anw;
+    }
 
     p_awh->views[id].p_anw = p_awh->pf_winFromSurface(p_env,
                                                       p_awh->views[id].jsurface);
+    if (id == AWindow_Subtitles)
+        msg_Err(p_awh->wnd, "XR_SUB_WINDOW AWindowHandler_getANativeWindow id=%s jsurface=%p anw=%p",
+                AWindowIdName(id), (void *) p_awh->views[id].jsurface,
+                (void *) p_awh->views[id].p_anw);
     return p_awh->views[id].p_anw;
 }
 
