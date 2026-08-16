@@ -1,4 +1,5 @@
 # SoXR
+# Modified for XRVLC by XRVLC contributors on 2026-08-16.
 
 SOXR_VERSION := 0.1.3
 SOXR_URL := $(GITHUB)/chirlu/soxr/archive/refs/tags/$(SOXR_VERSION).tar.gz

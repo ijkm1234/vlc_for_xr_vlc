@@ -2,6 +2,7 @@
  * essetup.h: es setup from stsd and extensions parsing
  *****************************************************************************
  * Copyright (C) 2001-2004, 2010, 2014 VLC authors and VideoLAN
+ * Modified for XRVLC by XRVLC contributors on 2026-08-16.
  *
  * Authors: Laurent Aimar <fenrir@via.ecp.fr>
  *
