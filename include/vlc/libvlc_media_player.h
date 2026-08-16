@@ -1268,6 +1268,27 @@ LIBVLC_API int64_t libvlc_video_get_spu_delay( libvlc_media_player_t *p_mi );
 LIBVLC_API int libvlc_video_set_spu_delay( libvlc_media_player_t *p_mi, int64_t i_delay );
 
 /**
+ * Controls whether XR subtitle surface regions are rearranged into a stacked
+ * off-screen layout. This only affects the Android subtitle surface rendering
+ * path used by the XR bridge.
+ *
+ * \param p_mi media player
+ * \param enabled true to stack subtitle regions outside the video screen
+ */
+LIBVLC_API void libvlc_video_set_xr_subtitle_stack_outside( libvlc_media_player_t *p_mi,
+                                                            bool enabled );
+
+/**
+ * Controls whether XR subtitles are rendered to the Android subtitles surface.
+ * When disabled, subtitles stay on the normal VLC video rendering path.
+ *
+ * \param p_mi media player
+ * \param enabled true to render subtitles to the external subtitles surface
+ */
+LIBVLC_API void libvlc_video_set_xr_subtitle_surface_enabled( libvlc_media_player_t *p_mi,
+                                                              bool enabled );
+
+/**
  * Get the full description of available titles
  *
  * \version LibVLC 3.0.0 and later.

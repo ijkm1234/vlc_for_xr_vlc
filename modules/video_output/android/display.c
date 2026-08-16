@@ -33,11 +33,14 @@
 #include <vlc_vout_display.h>
 #include <vlc_picture_pool.h>
 #include <vlc_filter.h>
+#include <vlc_codec.h>
 
 #include <vlc_opengl.h> /* for ClearSurface */
 #include <GLES2/gl2.h>  /* for ClearSurface */
 
 #include <dlfcn.h>
+#include <limits.h>
+#include <math.h>
 
 #include "display.h"
 #include "utils.h"
@@ -55,6 +58,35 @@ static int  Open (vlc_object_t *);
 static int  OpenOpaque (vlc_object_t *);
 static void Close(vlc_object_t *);
 static void SubpicturePrepare(vout_display_t *vd, subpicture_t *subpicture);
+
+static inline long long XrAndroidDiagMs(vlc_tick_t i_date)
+{
+    return i_date > VLC_TICK_INVALID ? (long long)(i_date / 1000) : -1;
+}
+
+static inline long long XrAndroidDiagDeltaMs(vlc_tick_t i_date,
+                                             vlc_tick_t i_now)
+{
+    return i_date > VLC_TICK_INVALID ? (long long)((i_date - i_now) / 1000) : -1;
+}
+
+static int XrAndroidDiagOpaqueIndex(picture_t *p_pic, bool *pb_locked)
+{
+    if (!p_pic || !p_pic->p_sys)
+    {
+        if (pb_locked)
+            *pb_locked = false;
+        return -2;
+    }
+
+    picture_sys_t *p_picsys = p_pic->p_sys;
+    vlc_mutex_lock(&p_picsys->hw.lock);
+    int i_index = p_picsys->hw.i_index;
+    if (pb_locked)
+        *pb_locked = p_picsys->b_locked;
+    vlc_mutex_unlock(&p_picsys->hw.lock);
+    return i_index;
+}
 
 vlc_module_begin()
     set_category(CAT_VIDEO)
@@ -112,6 +144,16 @@ struct buffer_bounds
     ARect bounds;
 };
 
+typedef struct
+{
+    subpicture_region_t *region;
+    double order;
+    unsigned index;
+} xr_subtitle_region_ref_t;
+
+#define XR_SUBTITLE_STACK_VAR "xr-subtitle-stack-outside"
+#define XR_SUBTITLE_SURFACE_ENABLED_VAR "xr-subtitle-surface-enabled"
+
 struct vout_display_sys_t
 {
     vout_window_t *embed;
@@ -137,11 +179,190 @@ struct vout_display_sys_t
     ARect sub_last_region;
 
     bool b_has_subpictures;
+    bool b_subpicture_updated;
+    unsigned int i_xr_sub_prepare_entry_logs;
+    unsigned int i_xr_sub_prepare_logs;
+    unsigned int i_xr_sub_subprepare_entry_logs;
+    unsigned int i_xr_sub_lock_logs;
+    unsigned int i_xr_sub_display_entry_logs;
+    unsigned int i_xr_sub_display_logs;
 
     uint8_t hash[16];
 };
 
 #define PRIV_WINDOW_FORMAT_YV12 0x32315659
+
+static const char *
+AndroidWindowIdName(enum AWindow_ID id)
+{
+    switch (id)
+    {
+        case AWindow_Video:
+            return "AWindow_Video";
+        case AWindow_Subtitles:
+            return "AWindow_Subtitles";
+        case AWindow_SurfaceTexture:
+            return "AWindow_SurfaceTexture";
+        default:
+            return "AWindow_Unknown";
+    }
+}
+
+static unsigned XrSubtitleRegionWidth(const subpicture_region_t *region)
+{
+    if (region->fmt.i_visible_width > 0)
+        return region->fmt.i_visible_width;
+    return region->fmt.i_width;
+}
+
+static unsigned XrSubtitleRegionHeight(const subpicture_region_t *region)
+{
+    if (region->fmt.i_visible_height > 0)
+        return region->fmt.i_visible_height;
+    return region->fmt.i_height;
+}
+
+static void XrSubtitleRegionTopLeft(const subpicture_region_t *region,
+                                    unsigned target_width,
+                                    unsigned target_height,
+                                    int *x,
+                                    int *y)
+{
+    const int width = (int) XrSubtitleRegionWidth(region);
+    const int height = (int) XrSubtitleRegionHeight(region);
+
+    if (region->i_align & SUBPICTURE_ALIGN_RIGHT)
+        *x = (int) target_width - region->i_x - width;
+    else if (region->i_align & SUBPICTURE_ALIGN_LEFT)
+        *x = region->i_x;
+    else
+        *x = ((int) target_width - width) / 2 + region->i_x;
+
+    if (region->i_align & SUBPICTURE_ALIGN_BOTTOM)
+        *y = (int) target_height - region->i_y - height;
+    else if (region->i_align & SUBPICTURE_ALIGN_TOP)
+        *y = region->i_y;
+    else
+        *y = ((int) target_height - height) / 2 + region->i_y;
+}
+
+static double XrSubtitleRegionOrder(const subpicture_region_t *region,
+                                    unsigned target_width,
+                                    unsigned target_height)
+{
+    int x, y;
+    XrSubtitleRegionTopLeft(region, target_width, target_height, &x, &y);
+
+    const double center_x = x + XrSubtitleRegionWidth(region) * 0.5;
+    const double center_y = y + XrSubtitleRegionHeight(region) * 0.5;
+    const double dx = center_x - target_width * 0.5;
+    const double dy = center_y - target_height * 0.5;
+    double angle = atan2(-dx, dy);
+    if (angle < 0.0)
+        angle += 6.28318530717958647692;
+    return angle;
+}
+
+static int XrSubtitleRegionCompare(const void *left, const void *right)
+{
+    const xr_subtitle_region_ref_t *a = left;
+    const xr_subtitle_region_ref_t *b = right;
+    if (a->order < b->order)
+        return -1;
+    if (a->order > b->order)
+        return 1;
+    if (a->index < b->index)
+        return -1;
+    if (a->index > b->index)
+        return 1;
+    return 0;
+}
+
+static subpicture_t *XrSubtitleStackSubpicture(const subpicture_t *source,
+                                               unsigned target_width,
+                                               unsigned target_height)
+{
+    if (!source || !source->p_region || target_width == 0 || target_height == 0)
+        return NULL;
+
+    unsigned count = 0;
+    for (const subpicture_region_t *region = source->p_region; region;
+         region = region->p_next)
+        count++;
+    if (count == 0)
+        return NULL;
+
+    xr_subtitle_region_ref_t *regions = calloc(count, sizeof(*regions));
+    if (!regions)
+        return NULL;
+
+    unsigned index = 0;
+    for (const subpicture_region_t *region = source->p_region; region;
+         region = region->p_next)
+    {
+        if (!region->p_picture)
+        {
+            for (unsigned i = 0; i < index; i++)
+                subpicture_region_Delete(regions[i].region);
+            free(regions);
+            return NULL;
+        }
+        regions[index].region = subpicture_region_Copy((subpicture_region_t *) region);
+        if (!regions[index].region)
+        {
+            for (unsigned i = 0; i < index; i++)
+                subpicture_region_Delete(regions[i].region);
+            free(regions);
+            return NULL;
+        }
+        regions[index].order = XrSubtitleRegionOrder(region, target_width,
+                                                     target_height);
+        regions[index].index = index;
+        index++;
+    }
+
+    qsort(regions, count, sizeof(*regions), XrSubtitleRegionCompare);
+
+    subpicture_t *stacked = subpicture_New(NULL);
+    if (!stacked)
+    {
+        for (unsigned i = 0; i < count; i++)
+            subpicture_region_Delete(regions[i].region);
+        free(regions);
+        return NULL;
+    }
+
+    stacked->i_channel = source->i_channel;
+    stacked->i_order = source->i_order;
+    stacked->i_start = source->i_start;
+    stacked->i_stop = source->i_stop;
+    stacked->b_ephemer = source->b_ephemer;
+    stacked->b_fade = source->b_fade;
+    stacked->b_subtitle = source->b_subtitle;
+    stacked->b_absolute = true;
+    stacked->i_original_picture_width = target_width;
+    stacked->i_original_picture_height = target_height;
+    stacked->i_alpha = source->i_alpha;
+
+    int y = 0;
+    subpicture_region_t **next = &stacked->p_region;
+    for (unsigned i = 0; i < count; i++)
+    {
+        subpicture_region_t *region = regions[i].region;
+        const int width = (int) XrSubtitleRegionWidth(region);
+        const int height = (int) XrSubtitleRegionHeight(region);
+        region->i_align = 0;
+        region->i_x = ((int) target_width - width) / 2;
+        region->i_y = y;
+        region->p_next = NULL;
+        *next = region;
+        next = &region->p_next;
+        y += height;
+    }
+
+    free(regions);
+    return stacked;
+}
 
 static inline int ChromaToAndroidHal(vlc_fourcc_t i_chroma)
 {
@@ -343,7 +564,19 @@ static int AndroidWindow_ConnectSurface(vout_display_sys_t *sys,
         p_window->p_surface = AWindowHandler_getANativeWindow(sys->p_awh,
                                                               p_window->id);
         if (!p_window->p_surface)
+        {
+            if (p_window->id == AWindow_Subtitles)
+                msg_Err(sys->embed, "XR_SUB_WINDOW AndroidWindow_ConnectSurface id=%s failed: surface=null window=%p",
+                        AndroidWindowIdName(p_window->id), (void *) p_window);
             return -1;
+        }
+        if (p_window->id == AWindow_Subtitles)
+            msg_Err(sys->embed, "XR_SUB_WINDOW AndroidWindow_ConnectSurface id=%s window=%p surface=%p opaque=%d use_priv=%d fmt=%ux%u visible=%ux%u chroma=0x%08x",
+                    AndroidWindowIdName(p_window->id), (void *) p_window,
+                    (void *) p_window->p_surface, p_window->b_opaque,
+                    p_window->b_use_priv, p_window->fmt.i_width,
+                    p_window->fmt.i_height, p_window->fmt.i_visible_width,
+                    p_window->fmt.i_visible_height, p_window->fmt.i_chroma);
         if (p_window->b_opaque)
             p_window->p_jsurface = AWindowHandler_getSurface(sys->p_awh,
                                                              p_window->id);
@@ -402,6 +635,15 @@ static android_window *AndroidWindow_New(vout_display_t *vd,
             msg_Err(vd, "can't get Subtitles Surface");
         goto error;
     }
+
+    if (id == AWindow_Subtitles)
+        msg_Err(vd, "XR_SUB_WINDOW AndroidWindow_New id=%s window=%p surface=%p opaque=%d use_priv=%d hal=%d angle=%u fmt=%ux%u visible=%ux%u chroma=0x%08x",
+                AndroidWindowIdName(id), (void *) p_window,
+                (void *) p_window->p_surface, p_window->b_opaque,
+                p_window->b_use_priv, p_window->i_android_hal,
+                p_window->i_angle, p_window->fmt.i_width,
+                p_window->fmt.i_height, p_window->fmt.i_visible_width,
+                p_window->fmt.i_visible_height, p_window->fmt.i_chroma);
 
     return p_window;
 error:
@@ -609,10 +851,109 @@ static void SetRGBMask(video_format_t *p_fmt)
     }
 }
 
+static bool XrSubtitleSurfaceEnabled(vout_display_t *vd)
+{
+    return var_InheritBool(vd, XR_SUBTITLE_SURFACE_ENABLED_VAR);
+}
+
+static void XrSubtitleReleaseSubWindow(vout_display_t *vd)
+{
+    vout_display_sys_t *sys = vd->sys;
+
+    if (sys->p_sub_pic)
+    {
+        picture_Release(sys->p_sub_pic);
+        sys->p_sub_pic = NULL;
+    }
+    if (sys->p_spu_blend)
+    {
+        filter_DeleteBlend(sys->p_spu_blend);
+        sys->p_spu_blend = NULL;
+    }
+    free(sys->p_sub_buffer_bounds);
+    sys->p_sub_buffer_bounds = NULL;
+    if (sys->p_sub_window)
+    {
+        msg_Err(vd, "XR_SUB_RENDER releasing subtitle window p_sub_window=%p surface=%p",
+                (void *) sys->p_sub_window,
+                (void *) sys->p_sub_window->p_surface);
+        AndroidWindow_Destroy(vd, sys->p_sub_window);
+        sys->p_sub_window = NULL;
+    }
+    sys->b_has_subpictures = false;
+    sys->b_subpicture_updated = false;
+    sys->b_sub_invalid = true;
+    sys->i_sub_last_order = -1;
+}
+
+static bool XrSubtitleEnsureSubWindow(vout_display_t *vd)
+{
+    vout_display_sys_t *sys = vd->sys;
+    video_format_t sub_fmt;
+
+    if (!XrSubtitleSurfaceEnabled(vd))
+        return false;
+    if (sys->p_sub_window)
+    {
+        ANativeWindow *surface = AWindowHandler_getANativeWindow(sys->p_awh,
+                                                                 AWindow_Subtitles);
+        if (!surface)
+        {
+            sys->p_sub_window->p_surface = NULL;
+            XrSubtitleReleaseSubWindow(vd);
+            return false;
+        }
+        if (surface != sys->p_sub_window->p_surface)
+        {
+            if (sys->p_sub_pic)
+            {
+                picture_Release(sys->p_sub_pic);
+                sys->p_sub_pic = NULL;
+            }
+            if (sys->p_spu_blend)
+            {
+                filter_DeleteBlend(sys->p_spu_blend);
+                sys->p_spu_blend = NULL;
+            }
+            free(sys->p_sub_buffer_bounds);
+            sys->p_sub_buffer_bounds = NULL;
+            sys->p_sub_window->p_surface = surface;
+            sys->b_sub_invalid = true;
+            msg_Err(vd, "XR_SUB_WINDOW updated p_sub_window=%p subtitle_surface=%p",
+                    (void *) sys->p_sub_window,
+                    (void *) sys->p_sub_window->p_surface);
+        }
+        return true;
+    }
+
+    video_format_ApplyRotation(&sub_fmt, &vd->fmt);
+    sub_fmt.i_chroma = subpicture_chromas[0];
+    SetRGBMask(&sub_fmt);
+    video_format_FixRgb(&sub_fmt);
+
+    sys->p_sub_window = AndroidWindow_New(vd, &sub_fmt, AWindow_Subtitles, false);
+    if (!sys->p_sub_window)
+        return false;
+
+    FixSubtitleFormat(sys);
+    sys->i_sub_last_order = -1;
+    sys->b_sub_invalid = true;
+    vd->info.subpicture_chromas = subpicture_chromas;
+    msg_Err(vd, "XR_SUB_WINDOW ensured p_sub_window=%p subtitle_surface=%p sub_chromas=%p chroma0=0x%08x fmt=%ux%u visible=%ux%u",
+            (void *) sys->p_sub_window,
+            (void *) sys->p_sub_window->p_surface,
+            (void *) vd->info.subpicture_chromas,
+            vd->info.subpicture_chromas ? vd->info.subpicture_chromas[0] : 0,
+            sys->p_sub_window->fmt.i_width,
+            sys->p_sub_window->fmt.i_height,
+            sys->p_sub_window->fmt.i_visible_width,
+            sys->p_sub_window->fmt.i_visible_height);
+    return true;
+}
+
 static int OpenCommon(vout_display_t *vd)
 {
     vout_display_sys_t *sys;
-    video_format_t sub_fmt;
 
     /* Fallback to normal projection in case of soft decoding/display (the
      * openGL vout, with a higher priority, should be used when the projection
@@ -700,20 +1041,13 @@ static int OpenCommon(vout_display_t *vd)
     msg_Dbg(vd, "using %s", sys->p_window->b_opaque ? "opaque" :
             (sys->p_window->b_use_priv ? "ANWP" : "ANW"));
 
-    video_format_ApplyRotation(&sub_fmt, &vd->fmt);
-    sub_fmt.i_chroma = subpicture_chromas[0];
-    SetRGBMask(&sub_fmt);
-    video_format_FixRgb(&sub_fmt);
-    sys->p_sub_window = AndroidWindow_New(vd, &sub_fmt, AWindow_Subtitles, false);
-    if (sys->p_sub_window) {
+    /* Export direct subpicture capability; xr-subtitle-surface-enabled decides
+     * at render time whether the core should use it. */
+    vd->info.subpicture_chromas = subpicture_chromas;
 
-        FixSubtitleFormat(sys);
-        sys->i_sub_last_order = -1;
-
-        /* Export the subpicture capability of this vout. */
-        vd->info.subpicture_chromas = subpicture_chromas;
-    }
-    else if (!vd->obj.force && sys->p_window->b_opaque)
+    if (!XrSubtitleEnsureSubWindow(vd) &&
+        XrSubtitleSurfaceEnabled(vd) &&
+        !vd->obj.force && sys->p_window->b_opaque)
     {
         msg_Warn(vd, "cannot blend subtitles with an opaque surface, "
                      "trying next vout");
@@ -1029,24 +1363,62 @@ static void SubpicturePrepare(vout_display_t *vd, subpicture_t *subpicture)
 {
     vout_display_sys_t *sys = vd->sys;
     ARect memset_bounds;
+    bool b_stack_outside = subpicture && var_InheritBool(vd, XR_SUBTITLE_STACK_VAR);
 
     SubtitleRegionToBounds(subpicture, &memset_bounds);
+    if (sys->i_xr_sub_subprepare_entry_logs < 20)
+    {
+        msg_Err(vd, "XR_SUB_RENDER SubpicturePrepare entry subpicture=%p p_sub_window=%p surface=%p p_sub_pic=%p p_spu_blend=%p bounds=[%d,%d,%d,%d] order=%lld last_order=%lld",
+                (void *) subpicture, (void *) sys->p_sub_window,
+                sys->p_sub_window ? (void *) sys->p_sub_window->p_surface : NULL,
+                (void *) sys->p_sub_pic, (void *) sys->p_spu_blend,
+                memset_bounds.left, memset_bounds.top,
+                memset_bounds.right, memset_bounds.bottom,
+                subpicture ? (long long) subpicture->i_order : -1,
+                (long long) sys->i_sub_last_order);
+        if (sys->i_xr_sub_subprepare_entry_logs < UINT_MAX)
+            sys->i_xr_sub_subprepare_entry_logs++;
+    }
 
     if( subpicture )
     {
         if( subpicture->i_order == sys->i_sub_last_order
          && memcmp( &memset_bounds, &sys->sub_last_region, sizeof(ARect) ) == 0 )
+        {
             return;
+        }
 
         sys->i_sub_last_order = subpicture->i_order;
         sys->sub_last_region = memset_bounds;
     }
 
-    if (AndroidWindow_LockPicture(sys, sys->p_sub_window, sys->p_sub_pic) != 0)
+    subpicture_t *stacked = NULL;
+    subpicture_t *blend_subpicture = subpicture;
+    if (b_stack_outside)
+    {
+        stacked = XrSubtitleStackSubpicture(subpicture,
+                                            sys->p_sub_pic->format.i_width,
+                                            sys->p_sub_pic->format.i_height);
+        if (stacked)
+            blend_subpicture = stacked;
+    }
+
+    int i_lock_result = AndroidWindow_LockPicture(sys, sys->p_sub_window, sys->p_sub_pic);
+    if (i_lock_result != 0)
+    {
+        msg_Err(vd, "XR_SUB_RENDER SubpicturePrepare lock failed result=%d subpicture=%p p_sub_window=%p surface=%p p_sub_pic=%p",
+                i_lock_result, (void *) subpicture,
+                (void *) sys->p_sub_window,
+                sys->p_sub_window ? (void *) sys->p_sub_window->p_surface : NULL,
+                (void *) sys->p_sub_pic);
+        if (stacked)
+            subpicture_Delete(stacked);
         return;
+    }
+    sys->b_subpicture_updated = true;
 
     /* Clear the subtitles surface. */
-    SubtitleGetDirtyBounds(vd, subpicture, &memset_bounds);
+    SubtitleGetDirtyBounds(vd, blend_subpicture, &memset_bounds);
     const int x_pixels_offset = memset_bounds.left
                                 * sys->p_sub_pic->p[0].i_pixel_pitch;
     const int i_line_size = (memset_bounds.right - memset_bounds.left)
@@ -1055,8 +1427,42 @@ static void SubpicturePrepare(vout_display_t *vd, subpicture_t *subpicture)
         memset(&sys->p_sub_pic->p[0].p_pixels[y * sys->p_sub_pic->p[0].i_pitch
                                               + x_pixels_offset], 0, i_line_size);
 
+    int i_blend_result = 0;
     if (subpicture)
-        picture_BlendSubpicture(sys->p_sub_pic, sys->p_spu_blend, subpicture);
+        i_blend_result = picture_BlendSubpicture(sys->p_sub_pic,
+                                                 sys->p_spu_blend,
+                                                 blend_subpicture);
+    if (stacked)
+        subpicture_Delete(stacked);
+
+    bool b_log_success = sys->i_xr_sub_lock_logs < 20;
+    bool b_log_failure = subpicture && i_blend_result <= 0;
+    if (b_log_failure)
+    {
+        msg_Err(vd, "XR_SUB_RENDER SubpicturePrepare lock/blend result lock=%d blend=%d subpicture=%p p_sub_window=%p surface=%p p_sub_pic=%p pixels=%p bounds=[%d,%d,%d,%d] order=%lld",
+                i_lock_result, i_blend_result, (void *) subpicture,
+                (void *) sys->p_sub_window,
+                sys->p_sub_window ? (void *) sys->p_sub_window->p_surface : NULL,
+                (void *) sys->p_sub_pic,
+                sys->p_sub_pic ? (void *) sys->p_sub_pic->p[0].p_pixels : NULL,
+                memset_bounds.left, memset_bounds.top,
+                memset_bounds.right, memset_bounds.bottom,
+                subpicture ? (long long) subpicture->i_order : -1);
+    }
+    else if (b_log_success)
+    {
+        msg_Dbg(vd, "XR_SUB_RENDER SubpicturePrepare lock/blend result lock=%d blend=%d subpicture=%p p_sub_window=%p surface=%p p_sub_pic=%p pixels=%p bounds=[%d,%d,%d,%d] order=%lld",
+                i_lock_result, i_blend_result, (void *) subpicture,
+                (void *) sys->p_sub_window,
+                sys->p_sub_window ? (void *) sys->p_sub_window->p_surface : NULL,
+                (void *) sys->p_sub_pic,
+                sys->p_sub_pic ? (void *) sys->p_sub_pic->p[0].p_pixels : NULL,
+                memset_bounds.left, memset_bounds.top,
+                memset_bounds.right, memset_bounds.bottom,
+                subpicture ? (long long) subpicture->i_order : -1);
+    }
+    if (sys->i_xr_sub_lock_logs < UINT_MAX)
+        sys->i_xr_sub_lock_logs++;
 }
 
 static picture_pool_t *Pool(vout_display_t *vd, unsigned requested_count)
@@ -1074,7 +1480,54 @@ static void Prepare(vout_display_t *vd, picture_t *picture,
     vout_display_sys_t *sys = vd->sys;
     VLC_UNUSED(picture);
 
+    sys->b_subpicture_updated = false;
+
+    if (!XrSubtitleSurfaceEnabled(vd))
+    {
+        if (sys->p_sub_window || sys->p_sub_pic || sys->p_spu_blend ||
+            sys->b_has_subpictures)
+        {
+            msg_Err(vd, "XR_SUB_RENDER disabled; releasing subtitle window p_sub_window=%p surface=%p subpicture=%p",
+                    (void *) sys->p_sub_window,
+                    sys->p_sub_window ? (void *) sys->p_sub_window->p_surface : NULL,
+                    (void *) subpicture);
+            XrSubtitleReleaseSubWindow(vd);
+        }
+        return;
+    }
+
+    if ((subpicture || sys->b_has_subpictures) &&
+        !XrSubtitleEnsureSubWindow(vd))
+    {
+        msg_Err(vd, "XR_SUB_RENDER Prepare skip reason=ensure_sub_window_failed subpicture=%p",
+                (void *) subpicture);
+        return;
+    }
+
+    if (!subpicture && !sys->b_has_subpictures)
+        goto end;
+
+    bool b_prepare_entry_success = sys->i_xr_sub_prepare_entry_logs < 20;
+    bool b_prepare_entry_skip = !subpicture || !sys->p_sub_window;
+    if (b_prepare_entry_success || b_prepare_entry_skip)
+    {
+        msg_Dbg(vd, "XR_SUB_RENDER Prepare entry subpicture=%p p_sub_window=%p surface=%p p_sub_pic=%p p_spu_blend=%p has_subpictures=%d b_sub_invalid=%d order=%lld skip_reason=%s",
+                (void *) subpicture, (void *) sys->p_sub_window,
+                sys->p_sub_window ? (void *) sys->p_sub_window->p_surface : NULL,
+                (void *) sys->p_sub_pic, (void *) sys->p_spu_blend,
+                sys->b_has_subpictures, sys->b_sub_invalid,
+                subpicture ? (long long) subpicture->i_order : -1,
+                !subpicture ? "subpicture_null" :
+                (!sys->p_sub_window ? "p_sub_window_null" : "none"));
+    }
+    if (sys->i_xr_sub_prepare_entry_logs < UINT_MAX)
+        sys->i_xr_sub_prepare_entry_logs++;
+
     if (subpicture && sys->p_sub_window) {
+        int i_setup_result = 0;
+        bool b_setup_called = false;
+        bool b_picture_alloc_attempted = false;
+        bool b_blend_create_attempted = false;
         if (sys->b_sub_invalid) {
             sys->b_sub_invalid = false;
             if (sys->p_sub_pic) {
@@ -1089,21 +1542,79 @@ static void Prepare(vout_display_t *vd, picture_t *picture,
             sys->p_sub_buffer_bounds = NULL;
         }
 
-        if (!sys->p_sub_pic
-         && AndroidWindow_Setup(sys, sys->p_sub_window, 1) == 0)
-            sys->p_sub_pic = PictureAlloc(sys, &sys->p_sub_window->fmt, false);
+        if (!sys->p_sub_pic)
+        {
+            b_setup_called = true;
+            i_setup_result = AndroidWindow_Setup(sys, sys->p_sub_window, 1);
+            if (i_setup_result == 0)
+            {
+                b_picture_alloc_attempted = true;
+                sys->p_sub_pic = PictureAlloc(sys, &sys->p_sub_window->fmt, false);
+            }
+        }
         if (!sys->p_spu_blend && sys->p_sub_pic)
+        {
+            b_blend_create_attempted = true;
             sys->p_spu_blend = filter_NewBlend(VLC_OBJECT(vd),
                                                &sys->p_sub_pic->format);
+        }
 
         if (sys->p_sub_pic && sys->p_spu_blend)
             sys->b_has_subpictures = true;
+
+        bool b_ready = sys->p_sub_pic && sys->p_spu_blend;
+        bool b_log_success = b_ready && sys->i_xr_sub_prepare_logs < 20;
+        bool b_log_failure = !b_ready;
+        if (b_log_failure)
+        {
+            msg_Err(vd, "XR_SUB_RENDER Prepare subpicture=%p p_sub_window=%p surface=%p setup=%d setup_called=%d picture_alloc_attempted=%d blend_create_attempted=%d p_sub_pic=%p p_spu_blend=%p has_subpictures=%d ready=%d order=%lld",
+                    (void *) subpicture, (void *) sys->p_sub_window,
+                    (void *) sys->p_sub_window->p_surface, i_setup_result,
+                    b_setup_called, b_picture_alloc_attempted,
+                    b_blend_create_attempted,
+                    (void *) sys->p_sub_pic, (void *) sys->p_spu_blend,
+                    sys->b_has_subpictures, b_ready,
+                    subpicture ? (long long) subpicture->i_order : -1);
+        }
+        else if (b_log_success)
+        {
+            msg_Dbg(vd, "XR_SUB_RENDER Prepare subpicture=%p p_sub_window=%p surface=%p setup=%d setup_called=%d picture_alloc_attempted=%d blend_create_attempted=%d p_sub_pic=%p p_spu_blend=%p has_subpictures=%d ready=%d order=%lld",
+                    (void *) subpicture, (void *) sys->p_sub_window,
+                    (void *) sys->p_sub_window->p_surface, i_setup_result,
+                    b_setup_called, b_picture_alloc_attempted,
+                    b_blend_create_attempted,
+                    (void *) sys->p_sub_pic, (void *) sys->p_spu_blend,
+                    sys->b_has_subpictures, b_ready,
+                    subpicture ? (long long) subpicture->i_order : -1);
+        }
+        if (b_ready && sys->i_xr_sub_prepare_logs < UINT_MAX)
+            sys->i_xr_sub_prepare_logs++;
+    }
+    else
+    {
+        if (subpicture)
+            msg_Err(vd, "XR_SUB_RENDER Prepare skip reason=p_sub_window_null subpicture=%p p_sub_window=%p surface=%p has_subpictures=%d p_sub_pic=%p p_spu_blend=%p",
+                    (void *) subpicture, (void *) sys->p_sub_window,
+                    sys->p_sub_window ? (void *) sys->p_sub_window->p_surface : NULL,
+                    sys->b_has_subpictures, (void *) sys->p_sub_pic,
+                    (void *) sys->p_spu_blend);
+        else
+            msg_Dbg(vd, "XR_SUB_RENDER Prepare skip reason=subpicture_null subpicture=%p p_sub_window=%p surface=%p has_subpictures=%d p_sub_pic=%p p_spu_blend=%p",
+                    (void *) subpicture, (void *) sys->p_sub_window,
+                    sys->p_sub_window ? (void *) sys->p_sub_window->p_surface : NULL,
+                    sys->b_has_subpictures, (void *) sys->p_sub_pic,
+                    (void *) sys->p_spu_blend);
     }
     /* As long as no subpicture was received, do not call
        SubpictureDisplay since JNI calls and clearing the subtitles
        surface are expensive operations. */
     if (sys->b_has_subpictures)
     {
+        msg_Dbg(vd, "XR_SUB_RENDER Prepare before_subprepare has_subpictures=%d subpicture=%p p_sub_window=%p surface=%p p_sub_pic=%p p_spu_blend=%p",
+                sys->b_has_subpictures, (void *) subpicture,
+                (void *) sys->p_sub_window,
+                sys->p_sub_window ? (void *) sys->p_sub_window->p_surface : NULL,
+                (void *) sys->p_sub_pic, (void *) sys->p_spu_blend);
         SubpicturePrepare(vd, subpicture);
         if (!subpicture)
         {
@@ -1113,6 +1624,15 @@ static void Prepare(vout_display_t *vd, picture_t *picture,
             sys->b_has_subpictures = false;
         }
     }
+    else
+    {
+        msg_Dbg(vd, "XR_SUB_RENDER Prepare skip_subprepare reason=no_subpictures subpicture=%p p_sub_window=%p surface=%p p_sub_pic=%p p_spu_blend=%p",
+                (void *) subpicture, (void *) sys->p_sub_window,
+                sys->p_sub_window ? (void *) sys->p_sub_window->p_surface : NULL,
+                (void *) sys->p_sub_pic, (void *) sys->p_spu_blend);
+    }
+
+end:
     if (sys->p_window->b_opaque
      && AndroidOpaquePicture_CanReleaseAtTime(picture->p_sys))
     {
@@ -1120,9 +1640,22 @@ static void Prepare(vout_display_t *vd, picture_t *picture,
         if (picture->date > now)
         {
             if (picture->date - now <= INT64_C(1000000))
+            {
                 AndroidOpaquePicture_ReleaseAtTime(picture->p_sys, picture->date);
+            }
             else /* The picture will be displayed from the Display callback */
+            {
+                bool b_locked;
+                int i_index = XrAndroidDiagOpaqueIndex(picture, &b_locked);
                 msg_Warn(vd, "picture way too early to release at time");
+                msg_Warn(vd, "XR_ANDROID_DISPLAY_DIAG way_too_early "
+                         "picture=%p index=%d locked=%d date_ms=%lld "
+                         "now_ms=%lld delta_ms=%lld",
+                         (void *) picture, i_index, b_locked,
+                         XrAndroidDiagMs(picture->date),
+                         XrAndroidDiagMs(now),
+                         XrAndroidDiagDeltaMs(picture->date, now));
+            }
         }
     }
 }
@@ -1132,16 +1665,41 @@ static void Display(vout_display_t *vd, picture_t *picture,
 {
     vout_display_sys_t *sys = vd->sys;
 
+    bool b_display_entry_success = sys->i_xr_sub_display_entry_logs < 20;
+    bool b_display_entry_skip = false;
+    if (b_display_entry_success || b_display_entry_skip)
+    {
+        msg_Dbg(vd, "XR_SUB_RENDER Display entry p_sub_pic=%p p_sub_window=%p surface=%p subpicture=%p will_post=%d",
+                (void *) sys->p_sub_pic, (void *) sys->p_sub_window,
+                sys->p_sub_window ? (void *) sys->p_sub_window->p_surface : NULL,
+                (void *) subpicture,
+                sys->b_subpicture_updated && sys->p_sub_pic != NULL);
+    }
+    if (sys->i_xr_sub_display_entry_logs < UINT_MAX)
+        sys->i_xr_sub_display_entry_logs++;
+
     if (sys->p_window->b_opaque)
+    {
         AndroidOpaquePicture_Release(picture->p_sys, true);
+    }
     else
         AndroidWindow_UnlockPicture(sys, sys->p_window, picture, true);
 
     picture_Release(picture);
 
-    if (sys->p_sub_pic)
+    if (sys->b_subpicture_updated && sys->p_sub_pic)
+    {
+        if (sys->i_xr_sub_display_logs < 20)
+            msg_Dbg(vd, "XR_SUB_RENDER Display posting subtitle surface p_sub_window=%p surface=%p p_sub_pic=%p subpicture=%p",
+                    (void *) sys->p_sub_window,
+                    sys->p_sub_window ? (void *) sys->p_sub_window->p_surface : NULL,
+                    (void *) sys->p_sub_pic, (void *) subpicture);
+        if (sys->i_xr_sub_display_logs < UINT_MAX)
+            sys->i_xr_sub_display_logs++;
         AndroidWindow_UnlockPicture(sys, sys->p_sub_window, sys->p_sub_pic,
                                     true);
+    }
+    sys->b_subpicture_updated = false;
 
     if (subpicture)
         subpicture_Delete(subpicture);

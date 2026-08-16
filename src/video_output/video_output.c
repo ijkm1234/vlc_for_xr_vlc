@@ -36,6 +36,7 @@
 
 #include <vlc_common.h>
 
+#include <limits.h>
 #include <stdlib.h>                                                /* free() */
 #include <string.h>
 #include <assert.h>
@@ -54,6 +55,17 @@
 #include "display.h"
 #include "window.h"
 #include "../misc/variables.h"
+
+#if defined(__ANDROID__)
+#define XR_SUBTITLE_SURFACE_ENABLED_VAR "xr-subtitle-surface-enabled"
+
+static bool XrSubtitleSurfaceDirectEnabled(vout_thread_t *vout,
+                                           vout_display_t *vd)
+{
+    VLC_UNUSED(vout);
+    return var_InheritBool(vd, XR_SUBTITLE_SURFACE_ENABLED_VAR);
+}
+#endif
 
 /*****************************************************************************
  * Local prototypes
@@ -424,8 +436,10 @@ picture_t *vout_GetPicture(vout_thread_t *vout)
  */
 void vout_PutPicture(vout_thread_t *vout, picture_t *picture)
 {
+    bool b_owns = picture_pool_OwnsPic(vout->p->decoder_pool, picture);
+
     picture->p_next = NULL;
-    if (picture_pool_OwnsPic(vout->p->decoder_pool, picture))
+    if (b_owns)
     {
         picture_fifo_Push(vout->p->decoder_fifo, picture);
 
@@ -848,7 +862,6 @@ static void ThreadChangeFilters(vout_thread_t *vout,
 static int ThreadDisplayPreparePicture(vout_thread_t *vout, bool reuse, bool frame_by_frame)
 {
     bool is_late_dropped = vout->p->is_late_dropped && !vout->p->pause.is_on && !frame_by_frame;
-
     vlc_mutex_lock(&vout->p->filter.lock);
 
     picture_t *picture = filter_chain_VideoFilter(vout->p->filter.chain_static, NULL);
@@ -907,6 +920,7 @@ static int ThreadDisplayPreparePicture(vout_thread_t *vout, bool reuse, bool fra
         vout->p->displayed.current = picture;
     else
         vout->p->displayed.next    = picture;
+
     return VLC_SUCCESS;
 }
 
@@ -968,7 +982,6 @@ static int ThreadDisplayRenderPicture(vout_thread_t *vout, bool is_forced)
 {
     vout_thread_sys_t *sys = vout->p;
     vout_display_t *vd = vout->p->display.vd;
-
     picture_t *torender = picture_Hold(vout->p->displayed.current);
 
     vout_chrono_Start(&vout->p->render);
@@ -999,7 +1012,11 @@ static int ThreadDisplayRenderPicture(vout_thread_t *vout, bool is_forced)
      */
     const bool do_dr_spu = !do_snapshot &&
                            vd->info.subpicture_chromas &&
-                           *vd->info.subpicture_chromas != 0;
+                           *vd->info.subpicture_chromas != 0
+#if defined(__ANDROID__)
+                           && XrSubtitleSurfaceDirectEnabled(vout, vd)
+#endif
+                           ;
 
     //FIXME: Denying do_early_spu if vd->source.orientation != ORIENT_NORMAL
     //will have the effect that snapshots miss the subpictures. We do this
@@ -1059,6 +1076,8 @@ static int ThreadDisplayRenderPicture(vout_thread_t *vout, bool is_forced)
                                       &vd->source,
                                       render_subtitle_date, render_osd_date,
                                       do_snapshot);
+    bool is_direct = vout->p->decoder_pool == vout->p->display_pool;
+    bool b_display_filtered = vout_IsDisplayFiltered(vd);
     /*
      * Perform rendering
      *
@@ -1066,7 +1085,6 @@ static int ThreadDisplayRenderPicture(vout_thread_t *vout, bool is_forced)
      * - be sure to end up with a direct buffer.
      * - blend subtitles, and in a fast access buffer
      */
-    bool is_direct = vout->p->decoder_pool == vout->p->display_pool;
     picture_t *todisplay = filtered;
     picture_t *snap_pic = todisplay;
     if (do_early_spu && subpic) {
@@ -1097,7 +1115,7 @@ static int ThreadDisplayRenderPicture(vout_thread_t *vout, bool is_forced)
         subpic = NULL;
     }
 
-    assert(vout_IsDisplayFiltered(vd) == !sys->display.use_dr);
+    assert(b_display_filtered == !sys->display.use_dr);
     if (sys->display.use_dr && !is_direct) {
         picture_t *direct = NULL;
         if (likely(vout->p->display_pool != NULL))
@@ -1187,7 +1205,6 @@ static int ThreadDisplayPicture(vout_thread_t *vout, vlc_tick_t *deadline)
     bool frame_by_frame = !deadline;
     bool paused = vout->p->pause.is_on;
     bool first = !vout->p->displayed.current;
-
     if (first)
         if (ThreadDisplayPreparePicture(vout, true, frame_by_frame)) /* FIXME not sure it is ok */
             return VLC_EGENERIC;
