@@ -2,6 +2,7 @@
  * libvlc_media_player.h:  libvlc_media_player external API
  *****************************************************************************
  * Copyright (C) 1998-2015 VLC authors and VideoLAN
+ * Modified for XRVLC by XRVLC contributors on 2026-08-16.
  * $Id$
  *
  * Authors: Clément Stenac <zorglub@videolan.org>

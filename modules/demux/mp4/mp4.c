@@ -2,6 +2,7 @@
  * mp4.c : MP4 file input module for vlc
  *****************************************************************************
  * Copyright (C) 2001-2004, 2010 VLC authors and VideoLAN
+ * Modified for XRVLC by XRVLC contributors on 2026-08-16.
  *
  * Authors: Laurent Aimar <fenrir@via.ecp.fr>
  *

@@ -2,6 +2,7 @@
  * display.c: Android video output module
  *****************************************************************************
  * Copyright (C) 2014 VLC authors and VideoLAN
+ * Modified for XRVLC by XRVLC contributors on 2026-08-16.
  *
  * Authors: Thomas Guillem <thomas@gllm.fr>
  *          Felix Abecassis <felix.abecassis@gmail.com>

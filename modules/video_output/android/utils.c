@@ -2,6 +2,7 @@
  * utils.c: shared code between Android vout modules.
  *****************************************************************************
  * Copyright (C) 2014-2015 VLC authors and VideoLAN
+ * Modified for XRVLC by XRVLC contributors on 2026-08-16.
  *
  * Authors: Felix Abecassis <felix.abecassis@gmail.com>
  *          Thomas Guillem <thomas@gllm.fr>

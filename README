@@ -1,5 +1,19 @@
-README for the VLC media player
-===============================
+README for the XRVLC VLC core fork
+==================================
+
+This repository is an independent modified fork of the VideoLAN VLC media
+player and multimedia engine. It is maintained for XRVLC and is not an
+official VideoLAN distribution. It is not affiliated with or endorsed by
+VideoLAN.
+
+The upstream source, base revision, and modified-file inventory are documented
+in `UPSTREAM.md`. Original code and XRVLC modifications remain subject to the
+license stated by each file and the accompanying `COPYING` and `COPYING.LIB`
+files.
+
+This documentation was modified for XRVLC on 2026-08-16.
+
+Upstream VLC information follows.
 
 VLC is a popular libre and open source media player and multimedia engine,
 used by a large number of individuals, professionals, companies and

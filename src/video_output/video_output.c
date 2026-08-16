@@ -6,6 +6,7 @@
  * thread, and destroy a previously oppened video output thread.
  *****************************************************************************
  * Copyright (C) 2000-2007 VLC authors and VideoLAN
+ * Modified for XRVLC by XRVLC contributors on 2026-08-16.
  * $Id$
  *
  * Authors: Vincent Seguin <seguin@via.ecp.fr>

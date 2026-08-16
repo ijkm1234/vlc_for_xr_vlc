@@ -2,6 +2,7 @@
  * video.c: libvlc new API video functions
  *****************************************************************************
  * Copyright (C) 2005-2010 VLC authors and VideoLAN
+ * Modified for XRVLC by XRVLC contributors on 2026-08-16.
  *
  * $Id$
  *
