@@ -269,6 +269,8 @@ static int Open( vlc_object_t *p_this )
         p_sys->url.psz_username = (char *) credential.psz_username;
         p_sys->url.psz_password = (char *) credential.psz_password;
     }
+    else if (vlc_killed())
+        goto error;
 
 connect:
     /* Connect */

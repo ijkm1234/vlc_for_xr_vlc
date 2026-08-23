@@ -135,6 +135,13 @@ enum tls_mode_e
     EXPLICIT /* ftpes */
 };
 
+enum ftp_listing_mode_e
+{
+    FTP_LISTING_NLST = 0,
+    FTP_LISTING_NLST_CLASSIFY,
+    FTP_LISTING_MLSD,
+};
+
 struct access_sys_t
 {
     vlc_url_t  url;
@@ -142,6 +149,7 @@ struct access_sys_t
     ftp_features_t   features;
     vlc_tls_creds_t *p_creds;
     enum tls_mode_e  tlsmode;
+    enum ftp_listing_mode_e listing_mode;
     vlc_tls_t *cmd;
     vlc_tls_t *data;
 
@@ -455,6 +463,9 @@ static int Login( vlc_object_t *p_access, access_sys_t *p_sys, const char *path 
     /* First: try credentials from url / option */
     vlc_credential_get( &credential, p_access, "ftp-user", "ftp-pwd",
                         NULL, NULL );
+    if (vlc_killed())
+        goto error;
+
     do
     {
         const char *psz_username = credential.psz_username;
@@ -473,6 +484,23 @@ static int Login( vlc_object_t *p_access, access_sys_t *p_sys, const char *path 
 
     if( b_logged )
     {
+        if( p_sys->features.b_unicode )
+        {
+            if( ftp_SendCommand( p_access, p_sys, "OPTS UTF8 ON" ) < 0 ||
+                ftp_RecvCommand( p_access, p_sys, &i_answer, NULL ) < 0 )
+            {
+                vlc_credential_clean( &credential );
+                vlc_UrlClean( &url );
+                goto error;
+            }
+
+            if( i_answer / 100 == 2 )
+                msg_Dbg( p_access, "UTF-8 filename encoding enabled" );
+            else
+                msg_Warn( p_access, "cannot enable UTF-8 filename encoding: "
+                                      "server replied with code %d", i_answer );
+        }
+
         vlc_credential_store( &credential, p_access );
         vlc_credential_clean( &credential );
         vlc_UrlClean( &url );
@@ -977,7 +1005,7 @@ static int DirRead (stream_t *p_access, input_item_node_t *p_current_node)
         if( psz_line == NULL )
             break;
 
-        if( p_sys->features.b_mlst )
+        if( p_sys->listing_mode == FTP_LISTING_MLSD )
         {
             const char *key, *val;
             char *facts = psz_line;
@@ -1006,7 +1034,24 @@ static int DirRead (stream_t *p_access, input_item_node_t *p_current_node)
             }
         }
         else
+        {
             psz_file = psz_line;
+
+            if( p_sys->listing_mode == FTP_LISTING_NLST_CLASSIFY )
+            {
+                size_t length = strlen( psz_file );
+
+                if( length > 0 &&
+                    ( psz_file[length - 1] == '/' ||
+                      psz_file[length - 1] == '\\' ) )
+                {
+                    psz_file[length - 1] = '\0';
+                    type = ITEM_TYPE_DIRECTORY;
+                }
+                else
+                    type = ITEM_TYPE_FILE;
+            }
+        }
 
         char *psz_uri;
         char *psz_filename = vlc_uri_encode( psz_file );
@@ -1193,15 +1238,23 @@ static int ftp_StartStream( vlc_object_t *p_access, access_sys_t *p_sys,
 
     if( b_directory )
     {
+        p_sys->listing_mode = FTP_LISTING_NLST;
+
         if( p_sys->features.b_mlst &&
             ftp_SendCommand( p_access, p_sys, "MLSD" ) >= 0 &&
             ftp_RecvCommandInit( p_access, p_sys ) == 1 )
         {
+            p_sys->listing_mode = FTP_LISTING_MLSD;
             msg_Dbg( p_access, "Using MLST extension to list" );
         }
-        else
-        if( ftp_SendCommand( p_access, p_sys, "NLST" ) < 0 ||
-            ftp_RecvCommandInit( p_access, p_sys ) != 1 )
+        else if( ftp_SendCommand( p_access, p_sys, "NLST -F" ) >= 0 &&
+                 ftp_RecvCommandInit( p_access, p_sys ) == 1 )
+        {
+            p_sys->listing_mode = FTP_LISTING_NLST_CLASSIFY;
+            msg_Dbg( p_access, "Using classified NLST directory list" );
+        }
+        else if( ftp_SendCommand( p_access, p_sys, "NLST" ) < 0 ||
+                 ftp_RecvCommandInit( p_access, p_sys ) != 1 )
         {
             msg_Err( p_access, "cannot list directory contents" );
             return VLC_EGENERIC;

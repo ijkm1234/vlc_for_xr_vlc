@@ -29,6 +29,7 @@
 #include <vlc/libvlc.h>
 #include <vlc/libvlc_renderer_discoverer.h>
 #include <vlc/libvlc_media.h>
+#include <vlc/libvlc_picture.h>
 #include <vlc/libvlc_events.h>
 
 #include <vlc_demux.h>
@@ -446,6 +447,22 @@ input_event_changed( vlc_object_t * p_this, char const * psz_cmd,
             }
         }
     }
+    else if ( newval.i_int == INPUT_EVENT_RECORD )
+    {
+        bool recording = var_GetBool( p_input, "record" );
+        char *file_path = NULL;
+
+        if ( !recording )
+            file_path = var_GetString( p_mi->obj.libvlc, "record-file" );
+
+        event.type = libvlc_MediaPlayerRecordChanged;
+        event.u.media_player_record_changed.file_path = file_path;
+        event.u.media_player_record_changed.recording = recording;
+
+        libvlc_event_send( &p_mi->event_manager, &event );
+
+        free( file_path );
+    }
 
     return VLC_SUCCESS;
 }
@@ -621,6 +638,7 @@ libvlc_media_player_new( libvlc_instance_t *instance )
     var_Create (mp, "rate", VLC_VAR_FLOAT|VLC_VAR_DOINHERIT);
     var_Create (mp, "sout", VLC_VAR_STRING);
     var_Create (mp, "demux-filter", VLC_VAR_STRING);
+    var_Create (mp, "input-record-path", VLC_VAR_STRING);
 
     /* Video */
     var_Create (mp, "vout", VLC_VAR_STRING|VLC_VAR_DOINHERIT);
@@ -1365,7 +1383,7 @@ libvlc_time_t libvlc_media_player_get_time( libvlc_media_player_t *p_mi )
 }
 
 void libvlc_media_player_set_time( libvlc_media_player_t *p_mi,
-                                   libvlc_time_t i_time )
+                                   libvlc_time_t i_time, bool b_fast )
 {
     input_thread_t *p_input_thread;
 
@@ -1373,12 +1391,13 @@ void libvlc_media_player_set_time( libvlc_media_player_t *p_mi,
     if( !p_input_thread )
         return;
 
+    var_SetBool( p_input_thread, "input-fast-seek", b_fast );
     var_SetInteger( p_input_thread, "time", to_mtime(i_time) );
     vlc_object_release( p_input_thread );
 }
 
 void libvlc_media_player_set_position( libvlc_media_player_t *p_mi,
-                                       float position )
+                                       float position, bool b_fast )
 {
     input_thread_t *p_input_thread;
 
@@ -1386,6 +1405,7 @@ void libvlc_media_player_set_position( libvlc_media_player_t *p_mi,
     if( !p_input_thread )
         return;
 
+    var_SetBool( p_input_thread, "input-fast-seek", b_fast );
     var_SetFloat( p_input_thread, "position", position );
     vlc_object_release( p_input_thread );
 }
@@ -2073,4 +2093,22 @@ int libvlc_media_player_get_role(libvlc_media_player_t *mp)
 
     free(str);
     return ret;
+}
+
+int libvlc_media_player_record( libvlc_media_player_t *p_mi,
+                                const char *directory )
+{
+    vlc_value_t val = { .psz_string = (char *)directory };
+    const bool enable = directory != NULL;
+    input_thread_t *p_input_thread = libvlc_get_input_thread ( p_mi );
+    if( !p_input_thread )
+        return VLC_EGENERIC;
+
+    if( enable )
+        var_Set( p_mi, "input-record-path", val );
+
+    var_SetBool( p_input_thread, "record", enable);
+
+    vlc_object_release( p_input_thread );
+    return VLC_SUCCESS;
 }

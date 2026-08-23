@@ -1460,6 +1460,15 @@ Stop( audio_output_t *p_aout )
     else
         vlc_mutex_unlock(  &p_sys->lock );
 
+    if( p_sys->p_dp )
+    {
+        JNI_CALL_INT( p_sys->p_dp, jfields.DynamicsProcessing.setEnabled, false );
+        CHECK_AT_EXCEPTION( "DynamicsProcessing.setEnabled" );
+
+        (*env)->DeleteGlobalRef( env, p_sys->p_dp );
+        p_sys->p_dp = NULL;
+    }
+
     /* Release the AudioTrack object */
     if( p_sys->p_audiotrack )
     {
@@ -1471,12 +1480,6 @@ Stop( audio_output_t *p_aout )
         }
         (*env)->DeleteGlobalRef( env, p_sys->p_audiotrack );
         p_sys->p_audiotrack = NULL;
-    }
-
-    if( p_sys->p_dp )
-    {
-        (*env)->DeleteGlobalRef( env, p_sys->p_dp );
-        p_sys->p_dp = NULL;
     }
 
     /* Release the timestamp object */

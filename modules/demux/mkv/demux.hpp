@@ -290,6 +290,8 @@ typedef struct {
 #endif
 ////////////////////////////////////////
 
+#include <memory>
+
 class virtual_segment_c;
 class chapter_item_c;
 
@@ -362,7 +364,8 @@ public:
     size_t                           i_current_title;
 
     std::vector<matroska_stream_c*>  streams;
-    std::vector<attachment_c*>       stored_attachments;
+    std::vector<std::unique_ptr<input_attachment_t,
+                    void(*)(input_attachment_t*)>> stored_attachments;
     std::vector<matroska_segment_c*> opened_segments;
     std::vector<virtual_segment_c*>  used_vsegments;
     virtual_segment_c                *p_current_vsegment;

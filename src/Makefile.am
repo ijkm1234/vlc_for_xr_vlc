@@ -61,6 +61,7 @@ pluginsinclude_HEADERS = \
 	../include/vlc_interface.h \
 	../include/vlc_keystore.h \
 	../include/vlc_main.h \
+	../include/vlc_list.h \
 	../include/vlc_md5.h \
 	../include/vlc_messages.h \
 	../include/vlc_meta.h \
@@ -240,6 +241,7 @@ libvlccore_la_SOURCES = \
 	input/info.h \
 	input/meta.c \
 	input/clock.h \
+	input/attachment.c \
 	input/decoder.h \
 	input/demux.h \
 	input/es_out.h \
