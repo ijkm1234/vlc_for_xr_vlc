@@ -104,7 +104,7 @@ static void Close(vlc_object_t *object)
     stream_t     *access = (stream_t *)object;
     access_sys_t *sys = access->p_sys;
 
-    vlc_input_attachment_Delete(sys->attachment);
+    vlc_input_attachment_Release(sys->attachment);
 }
 
 /* */

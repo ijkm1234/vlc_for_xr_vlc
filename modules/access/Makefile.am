@@ -347,14 +347,14 @@ EXTRA_LTLIBRARIES += libsmb_plugin.la
 
 libdsm_plugin_la_SOURCES = access/dsm/access.c access/dsm/sd.c access/smb_common.h
 libdsm_plugin_la_CFLAGS = $(AM_CFLAGS) $(DSM_CFLAGS)
-libdsm_plugin_la_LIBADD = $(DSM_LIBS)
+libdsm_plugin_la_LIBADD = $(DSM_LIBS) libvlc_access_cache.la
 libdsm_plugin_la_LDFLAGS = $(AM_LDFLAGS) -rpath '$(accessdir)'
 access_LTLIBRARIES += $(LTLIBdsm)
 EXTRA_LTLIBRARIES += libdsm_plugin.la
 
 libsmb2_plugin_la_SOURCES = access/smb2.c
 libsmb2_plugin_la_CFLAGS = $(AM_CFLAGS) $(SMB2_CFLAGS)
-libsmb2_plugin_la_LIBADD = $(SMB2_LIBS) $(SOCKET_LIBS)
+libsmb2_plugin_la_LIBADD = $(SMB2_LIBS) $(SOCKET_LIBS) libvlc_access_cache.la
 libsmb2_plugin_la_LDFLAGS = $(AM_LDFLAGS) -rpath '$(accessdir)'
 if HAVE_DSM
 libsmb2_plugin_la_CFLAGS += $(DSM_CFLAGS) -DHAVE_DSM
@@ -440,3 +440,11 @@ librist_plugin_la_SOURCES = access/rist.c access/rist.h
 librist_plugin_la_CFLAGS = $(AM_CFLAGS)
 librist_plugin_la_LIBADD = $(SOCKET_LIBS)
 access_LTLIBRARIES += librist_plugin.la
+
+### TOOLS ###
+
+libvlc_access_cache_la_SOURCES = access/cache.c access/cache.h
+libvlc_access_cache_la_LIBADD = $(LTLIBVLCCORE)
+libvlc_access_cache_la_LDFLAGS = -static
+libvlc_access_cache_la_CPPFLAGS = -Dneedsomethinghere
+noinst_LTLIBRARIES += libvlc_access_cache.la

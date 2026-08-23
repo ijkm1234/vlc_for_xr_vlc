@@ -168,7 +168,7 @@ stream_t *(vlc_stream_NewMRL)(vlc_object_t* parent, const char* mrl )
  * \return A pointer to the allocated output string. You need to free this when you are done.
  */
 #define STREAM_PROBE_LINE 2048
-#define STREAM_LINE_MAX (2048*100)
+#define STREAM_LINE_MAX (2048*2048)
 char *vlc_stream_ReadLine( stream_t *s )
 {
     stream_priv_t *priv = (stream_priv_t *)s;

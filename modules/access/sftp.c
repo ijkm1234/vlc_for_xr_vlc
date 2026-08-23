@@ -39,6 +39,7 @@
 #include <vlc_network.h>
 #include <vlc_url.h>
 #include <vlc_keystore.h>
+#include <vlc_interrupt.h>
 
 #include <libssh2.h>
 #include <libssh2_sftp.h>
@@ -352,6 +353,9 @@ static int Open( vlc_object_t* p_this )
 
     vlc_credential_get( &credential, p_access, "sftp-user", "sftp-pwd",
                         NULL, NULL );
+    if (vlc_killed())
+        goto error;
+
     char* psz_userauthlist = NULL;
     bool b_publickey_tried = false;
     do

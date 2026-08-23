@@ -52,6 +52,7 @@
 #include <vlc_input_item.h>
 #include <vlc_url.h>
 #include <vlc_keystore.h>
+#include <vlc_interrupt.h>
 #include <vlc_charset.h>
 
 #include "smb_common.h"
@@ -195,6 +196,15 @@ static int Open( vlc_object_t *p_this )
     credential.psz_realm = psz_var_domain;
     vlc_credential_get( &credential, p_access, "smb-user", "smb-pwd",
                         NULL, NULL );
+    if (vlc_killed())
+    {
+        vlc_credential_clean( &credential );
+        free(psz_var_domain);
+        free( psz_decoded_path );
+        vlc_UrlClean( &url );
+        return VLC_ENOMEM;
+    }
+
     for (;;)
     {
         if( smb_get_uri( p_access, &psz_uri, credential.psz_realm,

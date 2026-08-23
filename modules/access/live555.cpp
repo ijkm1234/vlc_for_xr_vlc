@@ -625,6 +625,11 @@ static int Connect( demux_t *p_demux )
         psz_user = credential.psz_username;
         psz_pwd = credential.psz_password;
     }
+    else if (vlc_killed())
+    {
+        i_ret = VLC_EGENERIC;
+        goto bailout;
+    }
 
 createnew:
     /* FIXME: This is naive and incorrect; it does not prevent the thread

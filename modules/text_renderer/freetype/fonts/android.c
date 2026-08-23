@@ -84,9 +84,31 @@ static int Android_ParseFont( filter_t *p_filter, xml_reader_t *p_xml,
      * We don't need all font weights. Only 400 (regular) and 700 (bold)
      */
     if( i_weight == 400 || i_weight == 700 )
-        if( asprintf( &psz_fontfile, "%s/%s", ANDROID_FONT_PATH, psz_val ) < 0
-         || !NewFont( psz_fontfile, 0, b_bold, b_italic, p_family ) )
+    {
+        /* left trim */
+        while( *psz_val && *psz_val <= ' ' )
+            psz_val++;
+        /* right trim */
+        size_t len = strlen( psz_val );
+        if( len > 1 )
+        {
+            const char *psz_end = psz_val + len;
+            while( psz_end > psz_val + 1 && psz_end[-1] <= ' ' )
+                psz_end--;
+            len = psz_end - psz_val;
+        }
+
+        psz_fontfile = malloc( sizeof(ANDROID_FONT_PATH) + 1 + len );
+        if( !psz_fontfile )
             return VLC_ENOMEM;
+        psz_fontfile[0] = '\0';
+        strcat( psz_fontfile, ANDROID_FONT_PATH );
+        strcat( psz_fontfile, "/" );
+        strncat( psz_fontfile, psz_val, len );
+
+        if( !NewFont( psz_fontfile, 0, b_bold, b_italic, p_family ) )
+            return VLC_ENOMEM;
+    }
 
     return VLC_SUCCESS;
 }

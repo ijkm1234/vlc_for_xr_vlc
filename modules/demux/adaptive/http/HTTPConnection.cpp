@@ -29,6 +29,7 @@
 
 #include <vlc_stream.h>
 #include <vlc_keystore.h>
+#include <vlc_interrupt.h>
 
 extern "C"
 {
@@ -315,6 +316,12 @@ RequestStatus LibVLCHTTPConnection::request(const std::string &path,
     {
         vlc_http_res_set_login(source->http_res,
                                crd.psz_username, crd.psz_password);
+    }
+    else if (vlc_killed())
+    {
+        vlc_credential_clean(&crd);
+        vlc_UrlClean(&crd_url);
+        return RequestStatus::GenericError;
     }
 
     int status = vlc_http_res_get_status(source->http_res);
