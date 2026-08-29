@@ -35,6 +35,7 @@
 #include <vlc_picture_pool.h>
 #include <vlc_filter.h>
 #include <vlc_codec.h>
+#include <vlc_image.h>
 
 #include <vlc_opengl.h> /* for ClearSurface */
 #include <GLES2/gl2.h>  /* for ClearSurface */
@@ -154,6 +155,7 @@ typedef struct
 
 #define XR_SUBTITLE_STACK_VAR "xr-subtitle-stack-outside"
 #define XR_SUBTITLE_SURFACE_ENABLED_VAR "xr-subtitle-surface-enabled"
+#define XR_SUBTITLE_MAX_EDGE_PIXELS 1920
 
 struct vout_display_sys_t
 {
@@ -365,6 +367,159 @@ static subpicture_t *XrSubtitleStackSubpicture(const subpicture_t *source,
     return stacked;
 }
 
+static unsigned XrSubtitleScaleDimension(unsigned value,
+                                         unsigned target_size,
+                                         unsigned source_size)
+{
+    if (value == 0 || target_size == 0 || source_size == 0)
+        return value;
+
+    uint64_t scaled = ((uint64_t) value * target_size + source_size / 2)
+                    / source_size;
+    return scaled > 0 ? (unsigned) scaled : 1;
+}
+
+static int XrSubtitleScaleCoordinate(int value,
+                                     unsigned target_size,
+                                     unsigned source_size)
+{
+    if (target_size == 0 || source_size == 0)
+        return value;
+
+    int64_t scaled = (int64_t) value * target_size;
+    if (scaled >= 0)
+        scaled += source_size / 2;
+    else
+        scaled -= source_size / 2;
+    return (int) (scaled / source_size);
+}
+
+static void XrSubtitleScaleRegionFormat(video_format_t *fmt,
+                                         unsigned target_width,
+                                         unsigned target_height,
+                                         unsigned source_width,
+                                         unsigned source_height)
+{
+    fmt->i_width = XrSubtitleScaleDimension(fmt->i_width, target_width,
+                                            source_width);
+    fmt->i_height = XrSubtitleScaleDimension(fmt->i_height, target_height,
+                                             source_height);
+    fmt->i_x_offset = XrSubtitleScaleDimension(fmt->i_x_offset, target_width,
+                                               source_width);
+    fmt->i_y_offset = XrSubtitleScaleDimension(fmt->i_y_offset, target_height,
+                                               source_height);
+    fmt->i_visible_width = XrSubtitleScaleDimension(fmt->i_visible_width,
+                                                    target_width,
+                                                    source_width);
+    fmt->i_visible_height = XrSubtitleScaleDimension(fmt->i_visible_height,
+                                                     target_height,
+                                                     source_height);
+
+    if (fmt->i_x_offset >= fmt->i_width)
+        fmt->i_x_offset = 0;
+    if (fmt->i_y_offset >= fmt->i_height)
+        fmt->i_y_offset = 0;
+    fmt->i_visible_width = __MIN(fmt->i_visible_width,
+                                 fmt->i_width - fmt->i_x_offset);
+    fmt->i_visible_height = __MIN(fmt->i_visible_height,
+                                  fmt->i_height - fmt->i_y_offset);
+}
+
+static subpicture_t *XrSubtitleScaleSubpicture(vout_display_t *vd,
+                                               const subpicture_t *source,
+                                               unsigned target_width,
+                                               unsigned target_height)
+{
+    if (!source || !source->p_region || target_width == 0 || target_height == 0
+     || source->i_original_picture_width <= 0
+     || source->i_original_picture_height <= 0)
+        return NULL;
+
+    const unsigned source_width = source->i_original_picture_width;
+    const unsigned source_height = source->i_original_picture_height;
+    if (source_width == target_width && source_height == target_height)
+        return NULL;
+
+    image_handler_t *image = image_HandlerCreate(vd);
+    if (!image)
+        return NULL;
+
+    subpicture_t *scaled = subpicture_New(NULL);
+    if (!scaled)
+    {
+        image_HandlerDelete(image);
+        return NULL;
+    }
+
+    scaled->i_channel = source->i_channel;
+    scaled->i_order = source->i_order;
+    scaled->i_start = source->i_start;
+    scaled->i_stop = source->i_stop;
+    scaled->b_ephemer = source->b_ephemer;
+    scaled->b_fade = source->b_fade;
+    scaled->b_subtitle = source->b_subtitle;
+    scaled->b_absolute = true;
+    scaled->i_original_picture_width = target_width;
+    scaled->i_original_picture_height = target_height;
+    scaled->i_alpha = source->i_alpha;
+
+    subpicture_region_t **next = &scaled->p_region;
+    for (const subpicture_region_t *region = source->p_region; region;
+         region = region->p_next)
+    {
+        if (!region->p_picture)
+            goto error;
+
+        video_format_t fmt_in = region->fmt;
+        video_format_t fmt_out = fmt_in;
+        XrSubtitleScaleRegionFormat(&fmt_out, target_width, target_height,
+                                    source_width, source_height);
+
+        picture_t *scaled_picture = image_Convert(image, region->p_picture,
+                                                   &fmt_in, &fmt_out);
+        if (!scaled_picture)
+            goto error;
+
+        subpicture_region_t *scaled_region = subpicture_region_New(&fmt_out);
+        if (!scaled_region)
+        {
+            picture_Release(scaled_picture);
+            goto error;
+        }
+
+        if (scaled_region->p_picture)
+            picture_Release(scaled_region->p_picture);
+        scaled_region->p_picture = scaled_picture;
+        scaled_region->i_x = XrSubtitleScaleCoordinate(region->i_x,
+                                                       target_width,
+                                                       source_width);
+        scaled_region->i_y = XrSubtitleScaleCoordinate(region->i_y,
+                                                       target_height,
+                                                       source_height);
+        scaled_region->i_align = region->i_align;
+        scaled_region->i_alpha = region->i_alpha;
+        scaled_region->i_text_align = region->i_text_align;
+        scaled_region->b_noregionbg = region->b_noregionbg;
+        scaled_region->b_gridmode = region->b_gridmode;
+        scaled_region->b_balanced_text = region->b_balanced_text;
+        scaled_region->i_max_width = XrSubtitleScaleCoordinate(
+            region->i_max_width, target_width, source_width);
+        scaled_region->i_max_height = XrSubtitleScaleCoordinate(
+            region->i_max_height, target_height, source_height);
+        scaled_region->p_next = NULL;
+        *next = scaled_region;
+        next = &scaled_region->p_next;
+    }
+
+    image_HandlerDelete(image);
+    return scaled;
+
+error:
+    image_HandlerDelete(image);
+    subpicture_Delete(scaled);
+    return NULL;
+}
+
 static inline int ChromaToAndroidHal(vlc_fourcc_t i_chroma)
 {
     switch (i_chroma) {
@@ -408,6 +563,26 @@ static int UpdateVideoSize(vout_display_sys_t *sys, video_format_t *p_fmt,
                                   rot_fmt.i_visible_height,
                                   i_sar_num, i_sar_den);
     return 0;
+}
+
+static void ClampSubtitleSurfaceSize(int *width, int *height)
+{
+    const int max_edge = __MAX(*width, *height);
+    if (max_edge <= XR_SUBTITLE_MAX_EDGE_PIXELS)
+        return;
+
+    if (*width >= *height)
+    {
+        *height = __MAX(1, (int) (((int64_t) *height
+                    * XR_SUBTITLE_MAX_EDGE_PIXELS + *width / 2) / *width));
+        *width = XR_SUBTITLE_MAX_EDGE_PIXELS;
+    }
+    else
+    {
+        *width = __MAX(1, (int) (((int64_t) *width
+                    * XR_SUBTITLE_MAX_EDGE_PIXELS + *height / 2) / *height));
+        *height = XR_SUBTITLE_MAX_EDGE_PIXELS;
+    }
 }
 
 static picture_t *PictureAlloc(vout_display_sys_t *sys, video_format_t *fmt,
@@ -498,6 +673,8 @@ static void FixSubtitleFormat(vout_display_sys_t *sys)
         i_width = i_video_width;
         i_height = i_video_height;
     }
+
+    ClampSubtitleSurfaceSize(&i_width, &i_height);
 
     p_subfmt->i_width =
     p_subfmt->i_visible_width = i_width;
@@ -1393,11 +1570,35 @@ static void SubpicturePrepare(vout_display_t *vd, subpicture_t *subpicture)
         sys->sub_last_region = memset_bounds;
     }
 
+    subpicture_t *scaled = NULL;
     subpicture_t *stacked = NULL;
     subpicture_t *blend_subpicture = subpicture;
+    if (subpicture && sys->p_sub_pic
+     && subpicture->i_original_picture_width > 0
+     && subpicture->i_original_picture_height > 0
+     && ((unsigned) subpicture->i_original_picture_width
+            != sys->p_sub_pic->format.i_visible_width
+      || (unsigned) subpicture->i_original_picture_height
+            != sys->p_sub_pic->format.i_visible_height))
+    {
+        scaled = XrSubtitleScaleSubpicture(
+            vd, subpicture,
+            sys->p_sub_pic->format.i_visible_width,
+            sys->p_sub_pic->format.i_visible_height);
+        if (!scaled)
+        {
+            msg_Err(vd, "XR_SUB_RENDER failed to scale subpicture canvas=%dx%d target=%ux%u",
+                    subpicture->i_original_picture_width,
+                    subpicture->i_original_picture_height,
+                    sys->p_sub_pic->format.i_visible_width,
+                    sys->p_sub_pic->format.i_visible_height);
+            return;
+        }
+        blend_subpicture = scaled;
+    }
     if (b_stack_outside)
     {
-        stacked = XrSubtitleStackSubpicture(subpicture,
+        stacked = XrSubtitleStackSubpicture(blend_subpicture,
                                             sys->p_sub_pic->format.i_width,
                                             sys->p_sub_pic->format.i_height);
         if (stacked)
@@ -1414,6 +1615,8 @@ static void SubpicturePrepare(vout_display_t *vd, subpicture_t *subpicture)
                 (void *) sys->p_sub_pic);
         if (stacked)
             subpicture_Delete(stacked);
+        if (scaled)
+            subpicture_Delete(scaled);
         return;
     }
     sys->b_subpicture_updated = true;
@@ -1435,6 +1638,8 @@ static void SubpicturePrepare(vout_display_t *vd, subpicture_t *subpicture)
                                                  blend_subpicture);
     if (stacked)
         subpicture_Delete(stacked);
+    if (scaled)
+        subpicture_Delete(scaled);
 
     bool b_log_success = sys->i_xr_sub_lock_logs < 20;
     bool b_log_failure = subpicture && i_blend_result <= 0;
