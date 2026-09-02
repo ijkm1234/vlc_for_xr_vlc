@@ -927,6 +927,9 @@ static int AndroidWindow_Setup(vout_display_sys_t *sys,
         int align_pixels;
         picture_t *p_pic = PictureAlloc(sys, &p_window->fmt, false);
 
+        if (!p_pic)
+            return -1;
+
         // For RGB (32 or 16) we need to align on 8 or 4 pixels, 16 pixels for YUV
         align_pixels = (16 / p_pic->p[0].i_pixel_pitch) - 1;
         p_window->fmt.i_height = p_pic->format.i_height;
@@ -1096,6 +1099,8 @@ static bool XrSubtitleEnsureSubWindow(vout_display_t *vd)
             free(sys->p_sub_buffer_bounds);
             sys->p_sub_buffer_bounds = NULL;
             sys->p_sub_window->p_surface = surface;
+            sys->b_has_subpictures = false;
+            sys->b_subpicture_updated = false;
             sys->b_sub_invalid = true;
             msg_Err(vd, "XR_SUB_WINDOW updated p_sub_window=%p subtitle_surface=%p",
                     (void *) sys->p_sub_window,
@@ -1543,6 +1548,16 @@ static void SubpicturePrepare(vout_display_t *vd, subpicture_t *subpicture)
     ARect memset_bounds;
     bool b_stack_outside = subpicture && var_InheritBool(vd, XR_SUBTITLE_STACK_VAR);
 
+    if (!sys->p_sub_window || !sys->p_sub_pic || !sys->p_spu_blend)
+    {
+        msg_Err(vd, "XR_SUB_RENDER SubpicturePrepare skip invalid state subpicture=%p p_sub_window=%p p_sub_pic=%p p_spu_blend=%p",
+                (void *) subpicture, (void *) sys->p_sub_window,
+                (void *) sys->p_sub_pic, (void *) sys->p_spu_blend);
+        sys->b_has_subpictures = false;
+        sys->b_subpicture_updated = false;
+        return;
+    }
+
     SubtitleRegionToBounds(subpicture, &memset_bounds);
     if (sys->i_xr_sub_subprepare_entry_logs < 20)
     {
@@ -1765,10 +1780,8 @@ static void Prepare(vout_display_t *vd, picture_t *picture,
                                                &sys->p_sub_pic->format);
         }
 
-        if (sys->p_sub_pic && sys->p_spu_blend)
-            sys->b_has_subpictures = true;
-
         bool b_ready = sys->p_sub_pic && sys->p_spu_blend;
+        sys->b_has_subpictures = b_ready;
         bool b_log_success = b_ready && sys->i_xr_sub_prepare_logs < 20;
         bool b_log_failure = !b_ready;
         if (b_log_failure)
